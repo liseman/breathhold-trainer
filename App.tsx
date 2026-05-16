@@ -1,5 +1,6 @@
+import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   SafeAreaView,
@@ -12,7 +13,6 @@ import {
 
 type Difficulty = 'beginner' | 'intermediate' | 'expert';
 type Focus = 'co2' | 'o2' | 'mixed' | 'technique' | 'pr';
-type Guidance = 'brief' | 'standard' | 'coach';
 type Risk = 'low' | 'moderate' | 'high';
 type PhaseKind = 'rest' | 'hold' | 'recovery' | 'settle';
 
@@ -45,12 +45,12 @@ type Plan = {
   focus: Focus;
   tableRows: TableRow[];
   phases: Phase[];
-  guidance: string[];
-  beforeYouStart: string[];
+  cues: string[];
+  sessionNotes: string[];
   recovery: string[];
   weeklyPlan: WeeklyItem[];
   progression: string[];
-  warnings: string[];
+  safetyLine: string;
 };
 
 type DifficultyProfile = {
@@ -66,10 +66,14 @@ type DifficultyProfile = {
   prTargetPct: number;
 };
 
+const breatheCue = require('./assets/audio/breathe.mp3');
+const holdCue = require('./assets/audio/hold.mp3');
+const halfwayCue = require('./assets/audio/halfway.mp3');
+
 const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
   beginner: {
     label: 'Beginner',
-    description: 'Comfort-first. Build consistency before intensity.',
+    description: 'Comfort first. Keep everything technically clean.',
     co2HoldPct: 0.58,
     co2RestStartPct: 1.2,
     co2RestFloor: 30,
@@ -81,7 +85,7 @@ const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
   },
   intermediate: {
     label: 'Intermediate',
-    description: 'Balanced progress with stronger contractions and cleaner pacing.',
+    description: 'Balanced stress with stronger contraction tolerance.',
     co2HoldPct: 0.68,
     co2RestStartPct: 1.05,
     co2RestFloor: 25,
@@ -89,11 +93,11 @@ const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
     o2StartPct: 0.58,
     o2EndPct: 0.92,
     techniquePct: 0.56,
-    prTargetPct: 1.0,
+    prTargetPct: 1,
   },
   expert: {
     label: 'Expert',
-    description: 'For experienced freedivers who already know their signals and recovery rhythm.',
+    description: 'For divers who already know their signals and pacing well.',
     co2HoldPct: 0.76,
     co2RestStartPct: 0.95,
     co2RestFloor: 20,
@@ -113,26 +117,13 @@ const FOCUS_LABELS: Record<Focus, string> = {
   pr: 'PR prep',
 };
 
-const GUIDANCE_LABELS: Record<Guidance, string> = {
-  brief: 'Brief',
-  standard: 'Standard',
-  coach: 'Coach',
-};
-
 const AGGRESSION_PRESETS = [20, 40, 60, 80, 100];
 
 const RISK_STYLES: Record<Risk, { label: string; color: string; bg: string }> = {
-  low: { label: 'Low risk', color: '#86efac', bg: '#0f2c1b' },
-  moderate: { label: 'Moderate risk', color: '#fde68a', bg: '#33250c' },
-  high: { label: 'High risk', color: '#fca5a5', bg: '#34161a' },
+  low: { label: 'Low', color: '#86efac', bg: '#0f2c1b' },
+  moderate: { label: 'Medium', color: '#fde68a', bg: '#33250c' },
+  high: { label: 'High', color: '#fca5a5', bg: '#34161a' },
 };
-
-const UNIVERSAL_WARNINGS = [
-  'Dry training only unless supervised by a competent buddy.',
-  'Never train in water alone. Never do tables while driving, walking stairs, or standing.',
-  'No hyperventilation, aggressive purging, or hard air-packing.',
-  'Stop immediately for tunnel vision, hearing fade, tingling, confusion, panic, or loss of motor control.',
-];
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -161,41 +152,44 @@ function buildAscending(start: number, end: number, count: number) {
 
 function buildWeeklyPlan(pbSec: number, difficulty: Difficulty): WeeklyItem[] {
   const profile = DIFFICULTY_PROFILES[difficulty];
-  const techniqueHold = formatTime(Math.round(pbSec * profile.techniquePct));
-  const hardCo2Hold = formatTime(Math.round(pbSec * profile.co2HoldPct));
-  const o2Peak = formatTime(Math.round(pbSec * profile.o2EndPct));
-
   return [
-    { day: 'Mon', title: 'Hard CO₂', detail: `${hardCo2Hold} holds with shrinking rest. Finish with control, not chaos.` },
-    { day: 'Tue', title: 'Easy technique', detail: `${techniqueHold} easy holds. Relax jaw, shoulders, tongue, and belly.` },
-    { day: 'Wed', title: 'O₂ table', detail: `Fixed rest, holds rising toward ${o2Peak}. Treat this as the higher-risk day.` },
-    { day: 'Thu', title: 'Off', detail: 'No hard apnea. Walk, stretch, sleep, and hydrate.' },
-    { day: 'Fri', title: 'Controlled CO₂', detail: 'Submax work to keep rhythm without stacking fatigue.' },
-    { day: 'Sat', title: 'PR prep or walking apnea', detail: 'Choose one: careful dry PR routine or short walking apnea sets.' },
-    { day: 'Sun', title: 'Off', detail: 'Let adaptation happen. Better to arrive fresh than fried.' },
+    {
+      day: 'Mon',
+      title: 'Hard CO₂',
+      detail: `${formatTime(Math.round(pbSec * profile.co2HoldPct))} holds with shrinking rest.`,
+    },
+    {
+      day: 'Tue',
+      title: 'Easy technique',
+      detail: `${formatTime(Math.round(pbSec * profile.techniquePct))} easy holds with soft posture.`,
+    },
+    {
+      day: 'Wed',
+      title: 'O₂ table',
+      detail: `Fixed rest, holds rising toward ${formatTime(Math.round(pbSec * profile.o2EndPct))}.`,
+    },
+    { day: 'Thu', title: 'Off', detail: 'No hard apnea. Let the system absorb the work.' },
+    { day: 'Fri', title: 'Controlled CO₂', detail: 'Moderate quality work, not survival mode.' },
+    { day: 'Sat', title: 'PR prep / walk apnea', detail: 'Choose one focused stressor, not both.' },
+    { day: 'Sun', title: 'Off', detail: 'Fresh beats fried.' },
   ];
 }
 
 function buildProgression(pbSec: number): string[] {
   return [
-    `Weeks 1–2: stay submax and learn what a calm ${formatTime(Math.round(pbSec * 0.75))} feels like.`,
-    'Weeks 3–4: keep CO₂ days hard enough to challenge comfort, not technique.',
-    'Weeks 5–6: let O₂ work creep upward slowly; if you are guessing whether it is too much, it probably is.',
-    'Weeks 7–8: reduce volume slightly and put quality into one clean PR-style day per week.',
+    `Weeks 1–2: live around ${formatTime(Math.round(pbSec * 0.75))} and make it feel calm.`,
+    'Weeks 3–4: raise discomfort tolerance without letting form get sloppy.',
+    'Weeks 5–6: let O₂ days creep up slowly while keeping recovery honest.',
+    'Weeks 7–8: reduce volume a bit and sharpen one good PR-style day each week.',
   ];
 }
 
-function selectGuidance(items: string[], guidance: Guidance) {
-  if (guidance === 'brief') return items.slice(0, 2);
-  if (guidance === 'standard') return items.slice(0, 4);
-  return items;
-}
-
-function createPlan(pbSec: number, difficulty: Difficulty, focus: Focus, aggression: number, guidance: Guidance): Plan {
+function createPlan(pbSec: number, difficulty: Difficulty, focus: Focus, aggression: number): Plan {
   const profile = DIFFICULTY_PROFILES[difficulty];
   const intensity = aggression / 100;
   const weeklyPlan = buildWeeklyPlan(pbSec, difficulty);
   const progression = buildProgression(pbSec);
+  const safetyLine = 'Dry only. No water alone, no hyperventilation, stop if your signals feel wrong.';
 
   if (focus === 'co2') {
     const holdSec = clamp(
@@ -215,44 +209,21 @@ function createPlan(pbSec: number, difficulty: Difficulty, focus: Focus, aggress
 
     return {
       title: `${profile.label} CO₂ table`,
-      subtitle: 'Same hold, decreasing rest. This is your urge-to-breathe training.',
-      rationale: 'CO₂ work improves comfort under contractions and teaches you not to burn energy fighting the urge to breathe.',
+      subtitle: 'Same hold, falling rest.',
+      rationale: 'Best for contraction tolerance and calm under mounting urge-to-breathe pressure.',
       risk: difficulty === 'expert' || aggression >= 80 ? 'moderate' : 'low',
       focus,
       tableRows,
       phases: tableRows.flatMap((row) => [
-        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe / recover', durationSec: row.restSec, roundLabel: row.label },
+        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
         { id: `${row.round}-hold`, kind: 'hold', label: 'Hold', durationSec: row.holdSec, roundLabel: row.label },
       ]),
-      guidance: selectGuidance(
-        [
-          'Contractions are information, not danger. Let them happen instead of bracing against them.',
-          'Keep jaw, tongue, shoulders, hands, and belly soft.',
-          'If the last two rounds feel easy, raise hold time a little next session — not the pace of your breathing.',
-          'If you fail the same round twice, reduce the hold by 10 seconds next time.',
-          'CO₂ tables usually move comfort faster than O₂ tables, which is why they are the safer default.',
-        ],
-        guidance
-      ),
-      beforeYouStart: selectGuidance(
-        [
-          'Lie down or sit somewhere safe.',
-          'Breathe normally. No purging or stacked inhalations.',
-          'Decide now that you will stop if the warning signs show up.',
-        ],
-        guidance
-      ),
-      recovery: selectGuidance(
-        [
-          'Take at least 48 hours before another hard CO₂ session.',
-          'If sleep worsens or contractions come early, swap your next hard day for easy technique.',
-          'A good session leaves you challenged but technically clean — not cracked open.',
-        ],
-        guidance
-      ),
+      cues: ['Relax around contractions.', 'Keep face, jaw, tongue, and shoulders soft.', 'Raise time slowly, not ego quickly.'],
+      sessionNotes: ['If the last rounds are easy, nudge time next session.', 'If form breaks twice, trim 10 seconds next time.'],
+      recovery: ['Take at least 48h before the next hard CO₂ set.', 'Swap the next hard day for technique if contractions arrive unusually early.'],
       weeklyPlan,
       progression,
-      warnings: UNIVERSAL_WARNINGS,
+      safetyLine,
     };
   }
 
@@ -274,99 +245,55 @@ function createPlan(pbSec: number, difficulty: Difficulty, focus: Focus, aggress
 
     return {
       title: `${profile.label} O₂ table`,
-      subtitle: 'Fixed rest, longer holds. Higher reward, higher risk.',
-      rationale: 'O₂ work can extend your real max hold, but it sneaks up on you. Calm is not the same thing as safe.',
+      subtitle: 'Fixed rest, rising holds.',
+      rationale: 'Best for extending max hold range, but keep it disciplined.',
       risk: 'high',
       focus,
       tableRows,
       phases: tableRows.flatMap((row) => [
-        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe / recover', durationSec: row.restSec, roundLabel: row.label },
+        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
         { id: `${row.round}-hold`, kind: 'hold', label: 'Hold', durationSec: row.holdSec, roundLabel: row.label },
       ]),
-      guidance: selectGuidance(
-        [
-          'Stay boring with your breathe-up. O₂ work gets dangerous when people get clever.',
-          'If a hold feels “weirdly easy,” do not chase that feeling with extra time.',
-          'Use this 1–2 times per week max unless you are already very adapted and supervised.',
-          'Treat the final rounds as optional if your signals are off that day.',
-          'This is the table most likely to inch you toward blackout territory if you ignore form.',
-        ],
-        guidance
-      ),
-      beforeYouStart: selectGuidance(
-        [
-          'Only do this dry, lying or seated, and not when overtired.',
-          'Skip O₂ work if you have a headache, poor sleep, or a weird stress buzz in your body.',
-          'If you are unsure whether today is an O₂ day, make it a technique day instead.',
-        ],
-        guidance
-      ),
-      recovery: selectGuidance(
-        [
-          'Give yourself at least 48–72 hours before another hypoxic session.',
-          'If your PB drops for two weeks, take 3–4 days off hard work.',
-          'O₂ progress tends to come from patience, not forcing one magic session.',
-        ],
-        guidance
-      ),
+      cues: ['Keep the breathe-up boring and repeatable.', 'Do not extend a hold just because it feels easy early.', 'Final rounds are optional, not mandatory.'],
+      sessionNotes: ['This is the most expensive stressor in the app.', 'If the day feels off, switch to technique instead.'],
+      recovery: ['Give yourself 48–72h before another real hypoxic set.', 'If PBs dip for two weeks, back off volume for several days.'],
       weeklyPlan,
       progression,
-      warnings: UNIVERSAL_WARNINGS,
+      safetyLine,
     };
   }
 
   if (focus === 'technique') {
     const holdSec = clamp(Math.round(pbSec * (profile.techniquePct - (1 - intensity) * 0.04)), 45, pbSec - 30);
     const restSec = clamp(Math.round(pbSec * 1.25), 120, 240);
-    const rows = Array.from({ length: 5 }, (_, index) => ({
+    const tableRows = Array.from({ length: 5 }, (_, index) => ({
       round: index + 1,
       label: `Easy hold ${index + 1}`,
       restSec,
       holdSec,
     }));
-
     const phases: Phase[] = [
-      { id: 'settle', kind: 'settle', label: 'Settle and relax', durationSec: 120 },
-      ...rows.flatMap((row): Phase[] => [
-        { id: `${row.round}-rest`, kind: 'rest', label: 'Slow nasal breathing', durationSec: row.restSec, roundLabel: row.label },
+      { id: 'settle', kind: 'settle', label: 'Settle', durationSec: 120 },
+      ...tableRows.flatMap((row): Phase[] => [
+        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
         { id: `${row.round}-hold`, kind: 'hold', label: 'Easy hold', durationSec: row.holdSec, roundLabel: row.label },
       ]),
     ];
 
     return {
-      title: 'Technique + relaxation',
-      subtitle: 'Easy holds that teach efficiency, not suffering.',
-      rationale: 'Most freedivers leak time through tension. Technique days are where you win that time back.',
+      title: 'Technique session',
+      subtitle: 'Easy holds for efficiency and softness.',
+      rationale: 'The cleanest way to steal back time is reducing tension leaks.',
       risk: 'low',
       focus,
-      tableRows: rows,
+      tableRows,
       phases,
-      guidance: selectGuidance(
-        [
-          'Let your face look almost sleepy. That usually means the rest of you is soft too.',
-          'Aim for the same smooth feeling on every hold rather than a longer number.',
-          'If contractions show up, greet them and relax around them.',
-          'Face immersion can help on dry statics if you already use it safely and calmly.',
-        ],
-        guidance
-      ),
-      beforeYouStart: selectGuidance(
-        [
-          'Give yourself two minutes to downshift before the first hold.',
-          'Do not turn an easy day into a test day because you feel good.',
-        ],
-        guidance
-      ),
-      recovery: selectGuidance(
-        [
-          'Technique sessions are the best choice when you are not fully recovered.',
-          'These can fit 2–3 times per week because the stress is low if you keep them honest.',
-        ],
-        guidance
-      ),
+      cues: ['Make your face look sleepy.', 'Let contractions happen without adding tension.', 'Use the same smooth feeling every round.'],
+      sessionNotes: ['This is the best option on a low-recovery day.', 'Do not turn a technique day into a test day.'],
+      recovery: ['Technique work can fit 2–3x per week if you keep it truly easy.'],
       weeklyPlan,
       progression,
-      warnings: UNIVERSAL_WARNINGS,
+      safetyLine,
     };
   }
 
@@ -374,104 +301,63 @@ function createPlan(pbSec: number, difficulty: Difficulty, focus: Focus, aggress
     const targetSec = clamp(Math.round(pbSec * (profile.prTargetPct + intensity * 0.02)), Math.max(90, pbSec - 10), Math.round(pbSec * 1.08));
     const warmupOne = clamp(Math.round(pbSec * 0.55), 60, 120);
     const warmupTwo = clamp(Math.round(pbSec * 0.85), warmupOne + 20, Math.max(warmupOne + 20, pbSec - 5));
+    const tableRows = [
+      { round: 1, label: 'Warmup 1', restSec: 180, holdSec: warmupOne },
+      { round: 2, label: 'Warmup 2', restSec: 240, holdSec: warmupTwo },
+      { round: 3, label: 'Target', restSec: 300, holdSec: targetSec },
+    ];
 
     return {
-      title: 'Static PR prep',
-      subtitle: 'A conservative dry max-attempt protocol.',
-      rationale: 'The goal is not to manufacture heroics. It is to arrive calm, warm, and technically clean for one controlled max attempt.',
+      title: 'PR prep',
+      subtitle: 'Conservative dry max-attempt rhythm.',
+      rationale: 'Arrive warm, calm, and technically clean for one controlled target hold.',
       risk: 'high',
       focus,
-      tableRows: [
-        { round: 1, label: 'Warmup 1', restSec: 180, holdSec: warmupOne },
-        { round: 2, label: 'Warmup 2', restSec: 240, holdSec: warmupTwo },
-        { round: 3, label: 'Target attempt', restSec: 300, holdSec: targetSec },
-      ],
+      tableRows,
       phases: [
-        { id: 'settle', kind: 'settle', label: 'Lie down and relax', durationSec: 300 },
+        { id: 'settle', kind: 'settle', label: 'Settle', durationSec: 300 },
         { id: 'w1-hold', kind: 'hold', label: 'Warmup hold 1', durationSec: warmupOne, roundLabel: 'Warmup 1' },
-        { id: 'w1-recovery', kind: 'recovery', label: 'Recovery', durationSec: 180, roundLabel: 'Warmup 1' },
+        { id: 'w1-rec', kind: 'recovery', label: 'Recover', durationSec: 180, roundLabel: 'Warmup 1' },
         { id: 'w2-hold', kind: 'hold', label: 'Warmup hold 2', durationSec: warmupTwo, roundLabel: 'Warmup 2' },
-        { id: 'w2-recovery', kind: 'recovery', label: 'Recovery', durationSec: 240, roundLabel: 'Warmup 2' },
-        { id: 'target-recovery', kind: 'recovery', label: 'Long reset', durationSec: 300, roundLabel: 'Target attempt' },
-        { id: 'target-hold', kind: 'hold', label: 'Target hold', durationSec: targetSec, roundLabel: 'Target attempt' },
+        { id: 'w2-rec', kind: 'recovery', label: 'Recover', durationSec: 240, roundLabel: 'Warmup 2' },
+        { id: 'target-rec', kind: 'recovery', label: 'Recover', durationSec: 300, roundLabel: 'Target' },
+        { id: 'target-hold', kind: 'hold', label: 'Target hold', durationSec: targetSec, roundLabel: 'Target' },
       ],
-      guidance: selectGuidance(
-        [
-          'No hard table the day before this.',
-          'The first contraction is not the cue to panic. It is the cue to relax more deeply.',
-          'Do not chase a number if your body feels “off.” Abort early and keep the protocol clean.',
-          'Breathe normally before the hold. No hyperventilation. No aggressive packing.',
-          'If your auditory field fades or vision narrows, the session is over. Not negotiable.',
-        ],
-        guidance
-      ),
-      beforeYouStart: selectGuidance(
-        [
-          'Only use PR prep on a day when sleep, stress, and hydration are all decent.',
-          'If you are training alone, this should stay dry and conservative.',
-          `Treat ${formatTime(targetSec)} as a ceiling, not an obligation.`,
-        ],
-        guidance
-      ),
-      recovery: selectGuidance(
-        [
-          'Take at least two easy days after a real max-attempt day.',
-          'If you feel drained or shaky afterward, cut the next week back slightly instead of chasing momentum.',
-        ],
-        guidance
-      ),
+      cues: ['No hard table the day before.', 'Abort early if the body feels wrong.', `Treat ${formatTime(targetSec)} as a ceiling, not a debt.`],
+      sessionNotes: ['Breathe normally before the hold.', 'One clean attempt beats a messy heroic one.'],
+      recovery: ['Take at least two easy days after a genuine max attempt.'],
       weeklyPlan,
       progression,
-      warnings: UNIVERSAL_WARNINGS,
+      safetyLine,
     };
   }
 
-  const controlledHold = clamp(Math.round(pbSec * (profile.co2HoldPct - 0.06)), 50, Math.max(55, pbSec - 20));
-  const controlledRest = clamp(Math.round(pbSec * 0.7), 60, 120);
-  const rows = Array.from({ length: 7 }, (_, index) => ({
+  const holdSec = clamp(Math.round(pbSec * (profile.co2HoldPct - 0.06)), 50, Math.max(55, pbSec - 20));
+  const restSec = clamp(Math.round(pbSec * 0.7), 60, 120);
+  const tableRows = Array.from({ length: 7 }, (_, index) => ({
     round: index + 1,
     label: `Controlled round ${index + 1}`,
-    restSec: controlledRest,
-    holdSec: controlledHold,
+    restSec,
+    holdSec,
   }));
 
   return {
-    title: 'Mixed week anchor session',
-    subtitle: 'A moderate controlled CO₂ session with a full weekly structure below.',
-    rationale: 'A mixed block works best when you stop trying to PR every day and give each stressor its own lane.',
+    title: 'Mixed week anchor',
+    subtitle: 'Moderate controlled work with a weekly structure below.',
+    rationale: 'Best when you want progress without making every day the same kind of suffering.',
     risk: 'moderate',
     focus,
-    tableRows: rows,
-    phases: rows.flatMap((row) => [
-      { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe / recover', durationSec: row.restSec, roundLabel: row.label },
-      { id: `${row.round}-hold`, kind: 'hold', label: 'Controlled hold', durationSec: row.holdSec, roundLabel: row.label },
+    tableRows,
+    phases: tableRows.flatMap((row) => [
+      { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
+      { id: `${row.round}-hold`, kind: 'hold', label: 'Hold', durationSec: row.holdSec, roundLabel: row.label },
     ]),
-    guidance: selectGuidance(
-      [
-        'Two hard days and one moderate day usually beats daily maxing.',
-        'Use the weekly structure below instead of turning every session into the same kind of suffering.',
-        'Walking apnea belongs in short, controlled doses — not as punishment cardio.',
-        'If holds get shorter despite effort, you are not underperforming. You are under-recovered.',
-      ],
-      guidance
-    ),
-    beforeYouStart: selectGuidance(
-      [
-        'Decide whether today is hard, moderate, or easy before you begin.',
-        'If recovery is questionable, downgrade the day. That is smart training, not weakness.',
-      ],
-      guidance
-    ),
-    recovery: selectGuidance(
-      [
-        'Keep only 2 true hard sessions per week unless you are already very adapted.',
-        'Sleep and nervous-system freshness matter more than squeezing in one more ugly hold.',
-      ],
-      guidance
-    ),
+    cues: ['Keep only two truly hard days per week.', 'Walking apnea belongs in small, clean doses.', 'If performance drops, recovery is the missing variable.'],
+    sessionNotes: ['Choose hard, moderate, or easy before you start and respect it.'],
+    recovery: ['Sleep and freshness matter more than squeezing in one more ugly hold.'],
     weeklyPlan,
     progression,
-    warnings: UNIVERSAL_WARNINGS,
+    safetyLine,
   };
 }
 
@@ -498,18 +384,29 @@ function formatPhaseKind(kind: PhaseKind) {
   return 'SETTLE';
 }
 
+async function playCue(source: number) {
+  const { sound } = await Audio.Sound.createAsync(source, { shouldPlay: true, volume: 1 });
+  sound.setOnPlaybackStatusUpdate((status) => {
+    if ('didJustFinish' in status && status.didJustFinish) {
+      sound.unloadAsync().catch(() => {});
+    }
+  });
+}
+
 export default function App() {
   const [minutes, setMinutes] = useState('2');
   const [seconds, setSeconds] = useState('30');
   const [difficulty, setDifficulty] = useState<Difficulty>('intermediate');
   const [focus, setFocus] = useState<Focus>('co2');
-  const [guidance, setGuidance] = useState<Guidance>('standard');
   const [aggression, setAggression] = useState(60);
   const [safetyConfirmed, setSafetyConfirmed] = useState(false);
   const [running, setRunning] = useState(false);
   const [phaseIndex, setPhaseIndex] = useState(0);
   const [phaseRemaining, setPhaseRemaining] = useState(0);
   const [sessionComplete, setSessionComplete] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(true);
+  const announcedPhaseIdRef = useRef<string | null>(null);
+  const halfwayAnnouncedPhaseIdRef = useRef<string | null>(null);
 
   const pbSec = useMemo(() => {
     const mins = Number.parseInt(minutes || '0', 10) || 0;
@@ -517,14 +414,53 @@ export default function App() {
     return clamp(mins * 60 + secs, 45, 600);
   }, [minutes, seconds]);
 
-  const plan = useMemo(() => createPlan(pbSec, difficulty, focus, aggression, guidance), [pbSec, difficulty, focus, aggression, guidance]);
+  const plan = useMemo(() => createPlan(pbSec, difficulty, focus, aggression), [pbSec, difficulty, focus, aggression]);
+
+  useEffect(() => {
+    Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     setRunning(false);
     setPhaseIndex(0);
     setPhaseRemaining(plan.phases[0]?.durationSec ?? 0);
     setSessionComplete(false);
+    announcedPhaseIdRef.current = null;
+    halfwayAnnouncedPhaseIdRef.current = null;
   }, [plan]);
+
+  const currentPhase = plan.phases[phaseIndex];
+
+  useEffect(() => {
+    if (!running || !audioEnabled || !currentPhase) return;
+    if (announcedPhaseIdRef.current === currentPhase.id) return;
+
+    announcedPhaseIdRef.current = currentPhase.id;
+    halfwayAnnouncedPhaseIdRef.current = null;
+
+    if (currentPhase.kind === 'hold') {
+      playCue(holdCue).catch(() => {});
+    } else if (currentPhase.kind === 'rest' || currentPhase.kind === 'recovery') {
+      playCue(breatheCue).catch(() => {});
+    }
+  }, [running, audioEnabled, currentPhase]);
+
+  useEffect(() => {
+    if (!running || !audioEnabled || !currentPhase) return;
+    if (currentPhase.kind !== 'hold') return;
+    if (currentPhase.durationSec < 20) return;
+    if (halfwayAnnouncedPhaseIdRef.current === currentPhase.id) return;
+
+    const halfwayMark = Math.ceil(currentPhase.durationSec / 2);
+    if (phaseRemaining === halfwayMark) {
+      halfwayAnnouncedPhaseIdRef.current = currentPhase.id;
+      playCue(halfwayCue).catch(() => {});
+    }
+  }, [running, audioEnabled, currentPhase, phaseRemaining]);
 
   useEffect(() => {
     if (!running) return;
@@ -551,9 +487,10 @@ export default function App() {
     setPhaseRemaining(plan.phases[nextIndex].durationSec);
   }, [running, phaseRemaining, phaseIndex, plan.phases]);
 
-  const currentPhase = plan.phases[phaseIndex];
   const totalSeconds = plan.phases.reduce((sum, phase) => sum + phase.durationSec, 0);
-  const elapsedSeconds = plan.phases.slice(0, phaseIndex).reduce((sum, phase) => sum + phase.durationSec, 0) + ((currentPhase?.durationSec ?? 0) - phaseRemaining);
+  const elapsedSeconds =
+    plan.phases.slice(0, phaseIndex).reduce((sum, phase) => sum + phase.durationSec, 0) +
+    ((currentPhase?.durationSec ?? 0) - phaseRemaining);
   const progress = totalSeconds > 0 ? clamp(elapsedSeconds / totalSeconds, 0, 1) : 0;
   const riskStyle = RISK_STYLES[plan.risk];
 
@@ -580,6 +517,8 @@ export default function App() {
     setPhaseIndex(0);
     setPhaseRemaining(plan.phases[0]?.durationSec ?? 0);
     setSessionComplete(false);
+    announcedPhaseIdRef.current = null;
+    halfwayAnnouncedPhaseIdRef.current = null;
   }
 
   return (
@@ -588,18 +527,14 @@ export default function App() {
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
         <View style={styles.heroCard}>
           <Text style={styles.eyebrow}>BreathHold Trainer</Text>
-          <Text style={styles.heroTitle}>Safe dry-table support for freedivers</Text>
+          <Text style={styles.heroTitle}>Tables, timer, and spoken cues</Text>
           <Text style={styles.heroBody}>
-            Adaptive CO₂ and O₂ tables, guided timing, technique cues, and recovery advice — built for dry static practice, not macho guesswork.
+            Adaptive dry-table sessions for freedivers, with the same voice from your phone stack calling the key beats.
           </Text>
-          <View style={styles.warningBanner}>
-            <Text style={styles.warningBannerText}>No hyperventilation. No water alone. Stop for tunnel vision, hearing fade, confusion, tingling, or panic.</Text>
-          </View>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Your baseline</Text>
-          <Text style={styles.cardSubtitle}>Set your current comfortable personal best for dry static training.</Text>
+          <Text style={styles.cardTitle}>Baseline</Text>
           <View style={styles.row}>
             <View style={styles.timeInputWrap}>
               <Text style={styles.inputLabel}>Minutes</Text>
@@ -661,18 +596,11 @@ export default function App() {
               />
             ))}
           </View>
-
-          <Text style={styles.sectionLabel}>Guidance</Text>
-          <View style={styles.choiceWrap}>
-            {(Object.keys(GUIDANCE_LABELS) as Guidance[]).map((item) => (
-              <ChoiceChip key={item} label={GUIDANCE_LABELS[item]} active={guidance === item} onPress={() => setGuidance(item)} />
-            ))}
-          </View>
         </View>
 
         <View style={styles.card}>
           <View style={styles.titleRow}>
-            <View>
+            <View style={styles.titleTextWrap}>
               <Text style={styles.cardTitle}>{plan.title}</Text>
               <Text style={styles.cardSubtitle}>{plan.subtitle}</Text>
             </View>
@@ -681,21 +609,12 @@ export default function App() {
             </View>
           </View>
           <Text style={styles.bodyText}>{plan.rationale}</Text>
-
-          <View style={styles.safetyChecklist}>
-            {plan.warnings.map((warning) => (
-              <View key={warning} style={styles.bulletRow}>
-                <Text style={styles.bullet}>•</Text>
-                <Text style={styles.bulletText}>{warning}</Text>
-              </View>
-            ))}
-          </View>
-
+          <Text style={styles.microSafety}>{plan.safetyLine}</Text>
           <Pressable style={styles.confirmRow} onPress={() => setSafetyConfirmed((current) => !current)}>
             <View style={[styles.checkbox, safetyConfirmed && styles.checkboxActive]}>
               {safetyConfirmed ? <Text style={styles.checkboxMark}>✓</Text> : null}
             </View>
-            <Text style={styles.confirmText}>I’m doing dry training safely and I’ll stop if warning signs show up.</Text>
+            <Text style={styles.confirmText}>Ready. I’m training dry and paying attention to my own signals.</Text>
           </Pressable>
         </View>
 
@@ -713,15 +632,23 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Guided timer</Text>
+          <View style={styles.titleRow}>
+            <Text style={styles.cardTitle}>Guided timer</Text>
+            <Pressable onPress={() => setAudioEnabled((current) => !current)} style={styles.audioToggle}>
+              <Text style={styles.audioToggleText}>{audioEnabled ? 'Audio on' : 'Audio off'}</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.helperText}>Voice cues: breathe, hold, and halfway through each hold.</Text>
           <View style={styles.timerShell}>
             <Text style={styles.timerPhase}>{sessionComplete ? 'COMPLETE' : formatPhaseKind(currentPhase?.kind ?? 'rest')}</Text>
             <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatTime(phaseRemaining)}</Text>
-            <Text style={styles.timerMeta}>{sessionComplete ? 'Nice work — recover fully.' : `${currentPhase?.roundLabel ?? 'Prep'} · ${currentPhase?.label ?? 'Ready'}`}</Text>
+            <Text style={styles.timerMeta}>{sessionComplete ? 'Recover fully.' : `${currentPhase?.roundLabel ?? 'Prep'} · ${currentPhase?.label ?? 'Ready'}`}</Text>
             <View style={styles.progressBarTrack}>
               <View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} />
             </View>
-            <Text style={styles.progressCaption}>{formatTime(elapsedSeconds)} elapsed · {formatTime(totalSeconds)} total</Text>
+            <Text style={styles.progressCaption}>
+              {formatTime(elapsedSeconds)} elapsed · {formatTime(totalSeconds)} total
+            </Text>
           </View>
 
           <View style={styles.buttonRow}>
@@ -738,15 +665,15 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Before you start</Text>
-          {plan.beforeYouStart.map((item) => (
+          <Text style={styles.cardTitle}>Session cues</Text>
+          {plan.cues.map((item) => (
             <View key={item} style={styles.bulletRow}>
               <Text style={styles.bullet}>•</Text>
               <Text style={styles.bulletText}>{item}</Text>
             </View>
           ))}
-          <Text style={[styles.cardTitle, styles.subsectionTitle]}>Coaching cues</Text>
-          {plan.guidance.map((item) => (
+          <Text style={[styles.cardTitle, styles.subsectionTitle]}>Quick notes</Text>
+          {plan.sessionNotes.map((item) => (
             <View key={item} style={styles.bulletRow}>
               <Text style={styles.bullet}>•</Text>
               <Text style={styles.bulletText}>{item}</Text>
@@ -765,7 +692,16 @@ export default function App() {
               </View>
             </View>
           ))}
+        </View>
 
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Recovery</Text>
+          {plan.recovery.map((item) => (
+            <View key={item} style={styles.bulletRow}>
+              <Text style={styles.bullet}>•</Text>
+              <Text style={styles.bulletText}>{item}</Text>
+            </View>
+          ))}
           <Text style={[styles.cardTitle, styles.subsectionTitle]}>8-week progression</Text>
           {plan.progression.map((item) => (
             <View key={item} style={styles.bulletRow}>
@@ -773,35 +709,6 @@ export default function App() {
               <Text style={styles.bulletText}>{item}</Text>
             </View>
           ))}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Recovery + overtraining checks</Text>
-          {plan.recovery.map((item) => (
-            <View key={item} style={styles.bulletRow}>
-              <Text style={styles.bullet}>•</Text>
-              <Text style={styles.bulletText}>{item}</Text>
-            </View>
-          ))}
-          <Text style={[styles.cardTitle, styles.subsectionTitle]}>Back off immediately if you notice:</Text>
-          {[
-            'Holds getting shorter despite strong effort.',
-            'Violent contractions unusually early in the hold.',
-            'Poor sleep, wired/tired feeling, or headache after sessions.',
-            'Loss of calm, panic, or sloppy recovery breathing.',
-          ].map((item) => (
-            <View key={item} style={styles.bulletRow}>
-              <Text style={styles.bullet}>•</Text>
-              <Text style={styles.bulletText}>{item}</Text>
-            </View>
-          ))}
-        </View>
-
-        <View style={styles.footerCard}>
-          <Text style={styles.footerTitle}>Important</Text>
-          <Text style={styles.footerText}>
-            This app is training support for experienced breath-hold athletes and curious dry-practice users. It is not medical advice, not a substitute for a coach, and not permission to ignore blackout risk.
-          </Text>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -847,19 +754,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
-  warningBanner: {
-    backgroundColor: '#31131a',
-    padding: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#60313b',
-  },
-  warningBannerText: {
-    color: '#fecdd3',
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '600',
-  },
   card: {
     backgroundColor: '#0d1728',
     borderRadius: 20,
@@ -867,24 +761,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1f2c43',
     gap: 10,
-  },
-  footerCard: {
-    backgroundColor: '#101826',
-    borderRadius: 20,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: '#2c394f',
-  },
-  footerTitle: {
-    color: '#f8fafc',
-    fontSize: 16,
-    fontWeight: '800',
-    marginBottom: 8,
-  },
-  footerText: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    lineHeight: 20,
   },
   cardTitle: {
     color: '#f8fafc',
@@ -899,6 +775,9 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     fontSize: 13,
     lineHeight: 19,
+  },
+  titleTextWrap: {
+    flex: 1,
   },
   row: {
     flexDirection: 'row',
@@ -1001,24 +880,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
-  safetyChecklist: {
-    gap: 6,
-  },
-  bulletRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  bullet: {
-    color: '#7dd3fc',
-    fontSize: 16,
-    lineHeight: 20,
-  },
-  bulletText: {
-    flex: 1,
-    color: '#dbe4f0',
-    fontSize: 14,
-    lineHeight: 20,
+  microSafety: {
+    color: '#93c5fd',
+    fontSize: 12,
+    lineHeight: 17,
   },
   confirmRow: {
     flexDirection: 'row',
@@ -1081,6 +946,19 @@ const styles = StyleSheet.create({
   tableTimeValue: {
     color: '#f8fafc',
     fontSize: 14,
+    fontWeight: '800',
+  },
+  audioToggle: {
+    backgroundColor: '#122034',
+    borderWidth: 1,
+    borderColor: '#2a4060',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  audioToggleText: {
+    color: '#dbeafe',
+    fontSize: 12,
     fontWeight: '800',
   },
   timerShell: {
@@ -1159,6 +1037,22 @@ const styles = StyleSheet.create({
     color: '#dbeafe',
     fontWeight: '700',
     fontSize: 15,
+  },
+  bulletRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  bullet: {
+    color: '#7dd3fc',
+    fontSize: 16,
+    lineHeight: 20,
+  },
+  bulletText: {
+    flex: 1,
+    color: '#dbe4f0',
+    fontSize: 14,
+    lineHeight: 20,
   },
   weekRow: {
     flexDirection: 'row',
