@@ -47,6 +47,25 @@ npm run build:web
 
 That writes the production web build to `dist/` and copies `index.html` to `404.html` for GitHub Pages refresh support.
 
+## TestFlight / iPhone build
+
+This repo is prepared for Expo EAS builds.
+
+```bash
+npm run build:ios
+```
+
+That creates a production iOS build for TestFlight. After the build is done:
+
+```bash
+npm run submit:ios
+```
+
+Notes:
+- You need an Expo account logged in via `eas login`.
+- You need access to the Apple Developer account for the app's bundle identifier.
+- The bundle identifier is `ai.openclaw.breathholdtrainer`.
+
 ## GitHub Pages publishing
 
 This repo includes a GitHub Actions workflow at `.github/workflows/deploy.yml`.

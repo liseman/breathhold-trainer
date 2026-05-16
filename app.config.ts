@@ -19,6 +19,9 @@ const config: ExpoConfig = {
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'ai.openclaw.breathholdtrainer',
+    infoPlist: {
+      ITSAppUsesNonExemptEncryption: false,
+    },
   },
   android: {
     adaptiveIcon: {
@@ -27,6 +30,7 @@ const config: ExpoConfig = {
     },
     edgeToEdgeEnabled: true,
     package: 'ai.openclaw.breathholdtrainer',
+    versionCode: 1,
   },
   web: {
     bundler: 'metro',
@@ -35,6 +39,11 @@ const config: ExpoConfig = {
   },
   experiments: {
     baseUrl,
+  },
+  extra: {
+    eas: {
+      projectId: '270ebfef-e546-4a79-983b-553c4a91b73e',
+    },
   },
 };
 

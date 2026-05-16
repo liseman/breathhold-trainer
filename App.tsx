@@ -1,7 +1,7 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { HALF_CUE_ASSETS } from './halfwayCues';
 import {
   Pressable,
   SafeAreaView,
@@ -11,15 +11,25 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { HALF_CUE_ASSETS } from './halfwayCues';
 
-type Difficulty = 'beginner' | 'intermediate' | 'expert';
-type Focus = 'co2' | 'o2' | 'mixed' | 'technique' | 'pr';
-type Risk = 'low' | 'moderate' | 'high';
+type SessionKind = 'technique' | 'co2' | 'o2' | 'pb' | 'recovery';
+type Effort = 'easy' | 'solid' | 'hard';
 type PhaseKind = 'rest' | 'hold' | 'recovery' | 'settle';
+
+type LogEntry = {
+  id: string;
+  date: string;
+  kind: SessionKind;
+  title: string;
+  completed: boolean;
+  effort?: Effort;
+  notes?: string;
+  bestHoldSec?: number;
+};
 
 type TableRow = {
   round: number;
-  label: string;
   restSec: number;
   holdSec: number;
 };
@@ -32,97 +42,40 @@ type Phase = {
   roundLabel?: string;
 };
 
-type WeeklyItem = {
-  day: string;
+type DailyPlan = {
+  kind: SessionKind;
   title: string;
-  detail: string;
-};
-
-type Plan = {
-  title: string;
-  subtitle: string;
-  rationale: string;
-  risk: Risk;
-  focus: Focus;
+  summary: string;
+  why: string;
+  whenToStop: string;
+  pbGuidance: string;
+  readyForPb: boolean;
   tableRows: TableRow[];
   phases: Phase[];
   cues: string[];
-  sessionNotes: string[];
-  recovery: string[];
-  weeklyPlan: WeeklyItem[];
-  progression: string[];
-  safetyLine: string;
 };
 
-type DifficultyProfile = {
-  label: string;
-  description: string;
-  co2HoldPct: number;
-  co2RestStartPct: number;
-  co2RestFloor: number;
-  o2RestPct: number;
-  o2StartPct: number;
-  o2EndPct: number;
-  techniquePct: number;
-  prTargetPct: number;
+type StoredState = {
+  pbSec: number;
+  logs: LogEntry[];
 };
 
+const STORAGE_KEY = 'breathhold-trainer-v2';
 const breatheCue = require('./assets/audio/breathe.mp3');
 const holdCue = require('./assets/audio/hold.mp3');
 
-const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
-  beginner: {
-    label: 'Beginner',
-    description: 'Comfort first. Keep everything technically clean.',
-    co2HoldPct: 0.58,
-    co2RestStartPct: 1.2,
-    co2RestFloor: 30,
-    o2RestPct: 1.0,
-    o2StartPct: 0.5,
-    o2EndPct: 0.82,
-    techniquePct: 0.5,
-    prTargetPct: 0.95,
-  },
-  intermediate: {
-    label: 'Intermediate',
-    description: 'Balanced stress with stronger contraction tolerance.',
-    co2HoldPct: 0.68,
-    co2RestStartPct: 1.05,
-    co2RestFloor: 25,
-    o2RestPct: 0.95,
-    o2StartPct: 0.58,
-    o2EndPct: 0.92,
-    techniquePct: 0.56,
-    prTargetPct: 1,
-  },
-  expert: {
-    label: 'Expert',
-    description: 'For divers who already know their signals and pacing well.',
-    co2HoldPct: 0.76,
-    co2RestStartPct: 0.95,
-    co2RestFloor: 20,
-    o2RestPct: 0.9,
-    o2StartPct: 0.64,
-    o2EndPct: 0.98,
-    techniquePct: 0.62,
-    prTargetPct: 1.04,
-  },
-};
-
-const FOCUS_LABELS: Record<Focus, string> = {
-  co2: 'CO₂ table',
-  o2: 'O₂ table',
-  mixed: 'Mixed week',
+const KIND_LABEL: Record<SessionKind, string> = {
   technique: 'Technique',
-  pr: 'PR prep',
+  co2: 'CO₂',
+  o2: 'O₂',
+  pb: 'PB',
+  recovery: 'Recovery',
 };
 
-const AGGRESSION_PRESETS = [20, 40, 60, 80, 100];
-
-const RISK_STYLES: Record<Risk, { label: string; color: string; bg: string }> = {
-  low: { label: 'Low', color: '#86efac', bg: '#0f2c1b' },
-  moderate: { label: 'Medium', color: '#fde68a', bg: '#33250c' },
-  high: { label: 'High', color: '#fca5a5', bg: '#34161a' },
+const EFFORT_LABEL: Record<Effort, string> = {
+  easy: 'Easy',
+  solid: 'Solid',
+  hard: 'Hard',
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -136,252 +89,49 @@ function formatTime(totalSeconds: number) {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-function lerp(start: number, end: number, t: number) {
-  return start + (end - start) * t;
+function parseTime(mins: string, secs: string) {
+  const m = Number.parseInt(mins || '0', 10) || 0;
+  const s = Number.parseInt(secs || '0', 10) || 0;
+  return clamp(m * 60 + s, 45, 600);
 }
 
-function buildDescending(start: number, end: number, count: number) {
-  return Array.from({ length: count }, (_, index) =>
-    Math.round(lerp(start, end, count === 1 ? 1 : index / (count - 1)))
-  );
+function todayKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
 }
 
-function buildAscending(start: number, end: number, count: number) {
-  return buildDescending(start, end, count);
+function daysBetween(a: string, b: string) {
+  const start = new Date(`${a}T00:00:00Z`).getTime();
+  const end = new Date(`${b}T00:00:00Z`).getTime();
+  return Math.round((end - start) / 86400000);
 }
 
-function buildWeeklyPlan(pbSec: number, difficulty: Difficulty): WeeklyItem[] {
-  const profile = DIFFICULTY_PROFILES[difficulty];
-  return [
-    {
-      day: 'Mon',
-      title: 'Hard CO₂',
-      detail: `${formatTime(Math.round(pbSec * profile.co2HoldPct))} holds with shrinking rest.`,
-    },
-    {
-      day: 'Tue',
-      title: 'Easy technique',
-      detail: `${formatTime(Math.round(pbSec * profile.techniquePct))} easy holds with soft posture.`,
-    },
-    {
-      day: 'Wed',
-      title: 'O₂ table',
-      detail: `Fixed rest, holds rising toward ${formatTime(Math.round(pbSec * profile.o2EndPct))}.`,
-    },
-    { day: 'Thu', title: 'Off', detail: 'No hard apnea. Let the system absorb the work.' },
-    { day: 'Fri', title: 'Controlled CO₂', detail: 'Moderate quality work, not survival mode.' },
-    { day: 'Sat', title: 'PR prep / walk apnea', detail: 'Choose one focused stressor, not both.' },
-    { day: 'Sun', title: 'Off', detail: 'Fresh beats fried.' },
-  ];
+function sortLogs(logs: LogEntry[]) {
+  return [...logs].sort((a, b) => b.date.localeCompare(a.date));
 }
 
-function buildProgression(pbSec: number): string[] {
-  return [
-    `Weeks 1–2: live around ${formatTime(Math.round(pbSec * 0.75))} and make it feel calm.`,
-    'Weeks 3–4: raise discomfort tolerance without letting form get sloppy.',
-    'Weeks 5–6: let O₂ days creep up slowly while keeping recovery honest.',
-    'Weeks 7–8: reduce volume a bit and sharpen one good PR-style day each week.',
-  ];
+function recentCompleted(logs: LogEntry[], days: number) {
+  const today = todayKey();
+  return logs.filter((log) => log.completed && daysBetween(log.date, today) <= days - 1);
 }
 
-function createPlan(pbSec: number, difficulty: Difficulty, focus: Focus, aggression: number): Plan {
-  const profile = DIFFICULTY_PROFILES[difficulty];
-  const intensity = aggression / 100;
-  const weeklyPlan = buildWeeklyPlan(pbSec, difficulty);
-  const progression = buildProgression(pbSec);
-  const safetyLine = 'Dry only. No water alone, no hyperventilation, stop if your signals feel wrong.';
+function countKinds(logs: LogEntry[], kinds: SessionKind[], days: number) {
+  return recentCompleted(logs, days).filter((log) => kinds.includes(log.kind)).length;
+}
 
-  if (focus === 'co2') {
-    const holdSec = clamp(
-      Math.round(pbSec * (profile.co2HoldPct + intensity * 0.08)),
-      45,
-      Math.max(50, pbSec - 10)
-    );
-    const restStart = clamp(Math.round(holdSec * (profile.co2RestStartPct + (1 - intensity) * 0.2)), 60, 210);
-    const restEnd = clamp(Math.round(profile.co2RestFloor + (1 - intensity) * 15), 20, restStart - 5);
-    const rests = buildDescending(restStart, restEnd, 8);
-    const tableRows = rests.map((restSec, index) => ({
-      round: index + 1,
-      label: `Round ${index + 1}`,
-      restSec,
-      holdSec,
-    }));
+function getLastCompleted(logs: LogEntry[]) {
+  return sortLogs(logs).find((log) => log.completed) ?? null;
+}
 
-    return {
-      title: `${profile.label} CO₂ table`,
-      subtitle: 'Same hold, falling rest.',
-      rationale: 'Best for contraction tolerance and calm under mounting urge-to-breathe pressure.',
-      risk: difficulty === 'expert' || aggression >= 80 ? 'moderate' : 'low',
-      focus,
-      tableRows,
-      phases: tableRows.flatMap((row) => [
-        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
-        { id: `${row.round}-hold`, kind: 'hold', label: 'Hold', durationSec: row.holdSec, roundLabel: row.label },
-      ]),
-      cues: ['Relax around contractions.', 'Keep face, jaw, tongue, and shoulders soft.', 'Raise time slowly, not ego quickly.'],
-      sessionNotes: ['If the last rounds are easy, nudge time next session.', 'If form breaks twice, trim 10 seconds next time.'],
-      recovery: ['Take at least 48h before the next hard CO₂ set.', 'Swap the next hard day for technique if contractions arrive unusually early.'],
-      weeklyPlan,
-      progression,
-      safetyLine,
-    };
+function getLastPb(logs: LogEntry[]) {
+  return sortLogs(logs).find((log) => log.completed && log.kind === 'pb') ?? null;
+}
+
+function pickRandomHalfCue(lastIndex: number | null) {
+  let nextIndex = Math.floor(Math.random() * HALF_CUE_ASSETS.length);
+  while (HALF_CUE_ASSETS.length > 1 && lastIndex !== null && nextIndex === lastIndex) {
+    nextIndex = Math.floor(Math.random() * HALF_CUE_ASSETS.length);
   }
-
-  if (focus === 'o2') {
-    const restSec = clamp(Math.round(pbSec * (profile.o2RestPct + (1 - intensity) * 0.08)), 90, 210);
-    const startHold = clamp(Math.round(pbSec * (profile.o2StartPct - (1 - intensity) * 0.04)), 50, pbSec - 30);
-    const endHold = clamp(
-      Math.round(pbSec * (profile.o2EndPct + (intensity - 0.5) * 0.06)),
-      startHold + 20,
-      difficulty === 'expert' ? Math.round(pbSec * 1.05) : pbSec
-    );
-    const holds = buildAscending(startHold, endHold, 8);
-    const tableRows = holds.map((holdSec, index) => ({
-      round: index + 1,
-      label: `Round ${index + 1}`,
-      restSec,
-      holdSec,
-    }));
-
-    return {
-      title: `${profile.label} O₂ table`,
-      subtitle: 'Fixed rest, rising holds.',
-      rationale: 'Best for extending max hold range, but keep it disciplined.',
-      risk: 'high',
-      focus,
-      tableRows,
-      phases: tableRows.flatMap((row) => [
-        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
-        { id: `${row.round}-hold`, kind: 'hold', label: 'Hold', durationSec: row.holdSec, roundLabel: row.label },
-      ]),
-      cues: ['Keep the breathe-up boring and repeatable.', 'Do not extend a hold just because it feels easy early.', 'Final rounds are optional, not mandatory.'],
-      sessionNotes: ['This is the most expensive stressor in the app.', 'If the day feels off, switch to technique instead.'],
-      recovery: ['Give yourself 48–72h before another real hypoxic set.', 'If PBs dip for two weeks, back off volume for several days.'],
-      weeklyPlan,
-      progression,
-      safetyLine,
-    };
-  }
-
-  if (focus === 'technique') {
-    const holdSec = clamp(Math.round(pbSec * (profile.techniquePct - (1 - intensity) * 0.04)), 45, pbSec - 30);
-    const restSec = clamp(Math.round(pbSec * 1.25), 120, 240);
-    const tableRows = Array.from({ length: 5 }, (_, index) => ({
-      round: index + 1,
-      label: `Easy hold ${index + 1}`,
-      restSec,
-      holdSec,
-    }));
-    const phases: Phase[] = [
-      { id: 'settle', kind: 'settle', label: 'Settle', durationSec: 120 },
-      ...tableRows.flatMap((row): Phase[] => [
-        { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
-        { id: `${row.round}-hold`, kind: 'hold', label: 'Easy hold', durationSec: row.holdSec, roundLabel: row.label },
-      ]),
-    ];
-
-    return {
-      title: 'Technique session',
-      subtitle: 'Easy holds for efficiency and softness.',
-      rationale: 'The cleanest way to steal back time is reducing tension leaks.',
-      risk: 'low',
-      focus,
-      tableRows,
-      phases,
-      cues: ['Make your face look sleepy.', 'Let contractions happen without adding tension.', 'Use the same smooth feeling every round.'],
-      sessionNotes: ['This is the best option on a low-recovery day.', 'Do not turn a technique day into a test day.'],
-      recovery: ['Technique work can fit 2–3x per week if you keep it truly easy.'],
-      weeklyPlan,
-      progression,
-      safetyLine,
-    };
-  }
-
-  if (focus === 'pr') {
-    const targetSec = clamp(Math.round(pbSec * (profile.prTargetPct + intensity * 0.02)), Math.max(90, pbSec - 10), Math.round(pbSec * 1.08));
-    const warmupOne = clamp(Math.round(pbSec * 0.55), 60, 120);
-    const warmupTwo = clamp(Math.round(pbSec * 0.85), warmupOne + 20, Math.max(warmupOne + 20, pbSec - 5));
-    const tableRows = [
-      { round: 1, label: 'Warmup 1', restSec: 180, holdSec: warmupOne },
-      { round: 2, label: 'Warmup 2', restSec: 240, holdSec: warmupTwo },
-      { round: 3, label: 'Target', restSec: 300, holdSec: targetSec },
-    ];
-
-    return {
-      title: 'PR prep',
-      subtitle: 'Conservative dry max-attempt rhythm.',
-      rationale: 'Arrive warm, calm, and technically clean for one controlled target hold.',
-      risk: 'high',
-      focus,
-      tableRows,
-      phases: [
-        { id: 'settle', kind: 'settle', label: 'Settle', durationSec: 300 },
-        { id: 'w1-hold', kind: 'hold', label: 'Warmup hold 1', durationSec: warmupOne, roundLabel: 'Warmup 1' },
-        { id: 'w1-rec', kind: 'recovery', label: 'Recover', durationSec: 180, roundLabel: 'Warmup 1' },
-        { id: 'w2-hold', kind: 'hold', label: 'Warmup hold 2', durationSec: warmupTwo, roundLabel: 'Warmup 2' },
-        { id: 'w2-rec', kind: 'recovery', label: 'Recover', durationSec: 240, roundLabel: 'Warmup 2' },
-        { id: 'target-rec', kind: 'recovery', label: 'Recover', durationSec: 300, roundLabel: 'Target' },
-        { id: 'target-hold', kind: 'hold', label: 'Target hold', durationSec: targetSec, roundLabel: 'Target' },
-      ],
-      cues: ['No hard table the day before.', 'Abort early if the body feels wrong.', `Treat ${formatTime(targetSec)} as a ceiling, not a debt.`],
-      sessionNotes: ['Breathe normally before the hold.', 'One clean attempt beats a messy heroic one.'],
-      recovery: ['Take at least two easy days after a genuine max attempt.'],
-      weeklyPlan,
-      progression,
-      safetyLine,
-    };
-  }
-
-  const holdSec = clamp(Math.round(pbSec * (profile.co2HoldPct - 0.06)), 50, Math.max(55, pbSec - 20));
-  const restSec = clamp(Math.round(pbSec * 0.7), 60, 120);
-  const tableRows = Array.from({ length: 7 }, (_, index) => ({
-    round: index + 1,
-    label: `Controlled round ${index + 1}`,
-    restSec,
-    holdSec,
-  }));
-
-  return {
-    title: 'Mixed week anchor',
-    subtitle: 'Moderate controlled work with a weekly structure below.',
-    rationale: 'Best when you want progress without making every day the same kind of suffering.',
-    risk: 'moderate',
-    focus,
-    tableRows,
-    phases: tableRows.flatMap((row) => [
-      { id: `${row.round}-rest`, kind: 'rest', label: 'Breathe', durationSec: row.restSec, roundLabel: row.label },
-      { id: `${row.round}-hold`, kind: 'hold', label: 'Hold', durationSec: row.holdSec, roundLabel: row.label },
-    ]),
-    cues: ['Keep only two truly hard days per week.', 'Walking apnea belongs in small, clean doses.', 'If performance drops, recovery is the missing variable.'],
-    sessionNotes: ['Choose hard, moderate, or easy before you start and respect it.'],
-    recovery: ['Sleep and freshness matter more than squeezing in one more ugly hold.'],
-    weeklyPlan,
-    progression,
-    safetyLine,
-  };
-}
-
-function ChoiceChip({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable onPress={onPress} style={[styles.choiceChip, active && styles.choiceChipActive]}>
-      <Text style={[styles.choiceChipText, active && styles.choiceChipTextActive]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function formatPhaseKind(kind: PhaseKind) {
-  if (kind === 'hold') return 'HOLD';
-  if (kind === 'rest') return 'BREATHE';
-  if (kind === 'recovery') return 'RECOVER';
-  return 'SETTLE';
+  return { asset: HALF_CUE_ASSETS[nextIndex], index: nextIndex };
 }
 
 async function playCue(source: number) {
@@ -393,38 +143,212 @@ async function playCue(source: number) {
   });
 }
 
-function pickRandomHalfCue(lastIndex: number | null) {
-  if (HALF_CUE_ASSETS.length === 1) return { asset: HALF_CUE_ASSETS[0], index: 0 };
-  let nextIndex = Math.floor(Math.random() * HALF_CUE_ASSETS.length);
-  while (lastIndex !== null && nextIndex === lastIndex) {
-    nextIndex = Math.floor(Math.random() * HALF_CUE_ASSETS.length);
+function buildPhases(rows: TableRow[], holdLabel = 'Hold'): Phase[] {
+  return rows.flatMap((row) => [
+    { id: `${row.round}-rest`, kind: 'rest' as const, label: 'Breathe', durationSec: row.restSec, roundLabel: `Round ${row.round}` },
+    { id: `${row.round}-hold`, kind: 'hold' as const, label: holdLabel, durationSec: row.holdSec, roundLabel: `Round ${row.round}` },
+  ]);
+}
+
+function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPlan {
+  const sorted = sortLogs(logs);
+  const today = todayKey();
+  const lastCompleted = getLastCompleted(sorted);
+  const daysSinceLast = lastCompleted ? daysBetween(lastCompleted.date, today) : 999;
+  const hardLast3 = countKinds(sorted, ['co2', 'o2', 'pb'], 3);
+  const totalLast7 = recentCompleted(sorted, 7).length;
+  const co2Last7 = countKinds(sorted, ['co2'], 7);
+  const o2Last7 = countKinds(sorted, ['o2'], 7);
+  const lastPb = getLastPb(sorted);
+  const daysSincePb = lastPb ? daysBetween(lastPb.date, today) : 999;
+  const recentRecovery = countKinds(sorted, ['recovery', 'technique'], 3);
+  const readyForPb = totalLast7 >= 4 && co2Last7 >= 1 && o2Last7 >= 1 && recentRecovery >= 1 && daysSinceLast <= 1 && daysSincePb >= 7;
+
+  if (kind === 'recovery') {
+    const rows = [
+      { round: 1, restSec: 120, holdSec: Math.round(pbSec * 0.42) },
+      { round: 2, restSec: 120, holdSec: Math.round(pbSec * 0.42) },
+      { round: 3, restSec: 120, holdSec: Math.round(pbSec * 0.42) },
+    ];
+    return {
+      kind,
+      title: 'Recovery day',
+      summary: 'Keep it light or skip hard apnea entirely.',
+      why: daysSinceLast >= 3
+        ? 'You had a gap, so the move is to re-enter smoothly instead of pretending nothing happened.'
+        : 'Your recent work is dense enough that adaptation beats adding more stress today.',
+      whenToStop: 'If anything feels edgy or stale, stop after one or two easy holds.',
+      pbGuidance: readyForPb
+        ? 'You are close to PB-ready, but take the easy day first so tomorrow has a real chance to pop.'
+        : 'Do not chase a PB off a recovery day. Let freshness accumulate first.',
+      readyForPb,
+      tableRows: rows,
+      phases: [{ id: 'settle', kind: 'settle', label: 'Settle', durationSec: 120 }, ...buildPhases(rows, 'Easy hold')],
+      cues: ['Long exhales. Soft body.', 'Treat this as nervous-system cleanup, not a test.', 'Finish fresher than you started.'],
+    };
   }
-  return { asset: HALF_CUE_ASSETS[nextIndex], index: nextIndex };
+
+  if (kind === 'technique') {
+    const hold = Math.round(pbSec * 0.52);
+    const rows = Array.from({ length: 5 }, (_, i) => ({ round: i + 1, restSec: 135, holdSec: hold }));
+    return {
+      kind,
+      title: 'Technique session',
+      summary: 'Easy statics to sharpen relaxation and efficiency.',
+      why: 'You either need a reset, a re-entry day, or a low-cost session that still moves the needle.',
+      whenToStop: 'Stop once the smooth feeling disappears; do not turn a technique day into a grit day.',
+      pbGuidance: readyForPb
+        ? 'If this feels almost boring and tomorrow you still feel fresh, a PB attempt becomes reasonable.'
+        : 'Stay submax until you have a few recent clean sessions stacked together.',
+      readyForPb,
+      tableRows: rows,
+      phases: [{ id: 'settle', kind: 'settle', label: 'Settle', durationSec: 120 }, ...buildPhases(rows, 'Easy hold')],
+      cues: ['Sleepy face, soft jaw, loose shoulders.', 'No heroics.', 'Make every hold look the same.'],
+    };
+  }
+
+  if (kind === 'o2') {
+    const restSec = clamp(Math.round(pbSec * 0.92), 90, 180);
+    const start = Math.round(pbSec * 0.58);
+    const end = Math.round(pbSec * 0.9);
+    const rows = Array.from({ length: 7 }, (_, i) => ({
+      round: i + 1,
+      restSec,
+      holdSec: Math.round(start + ((end - start) * i) / 6),
+    }));
+    return {
+      kind,
+      title: 'O₂ day',
+      summary: 'Fixed rest, rising holds. Controlled hypoxic work.',
+      why: 'You have enough recent base work that today can push range instead of just comfort.',
+      whenToStop: 'Stop if the quality gets weird, not just when it gets hard.',
+      pbGuidance: readyForPb
+        ? 'If this session lands cleanly and tomorrow feels good, a PB attempt is on the table.'
+        : 'You are building the ceiling today, not cashing it out yet.',
+      readyForPb,
+      tableRows: rows,
+      phases: buildPhases(rows),
+      cues: ['Keep the breathe-up boring.', 'Final rounds are optional.', 'Calm is not the same as safe, so stay disciplined.'],
+    };
+  }
+
+  if (kind === 'pb') {
+    const warmupOne = Math.round(pbSec * 0.55);
+    const warmupTwo = Math.round(pbSec * 0.82);
+    const target = Math.round(pbSec * 1.02);
+    const rows = [
+      { round: 1, restSec: 180, holdSec: warmupOne },
+      { round: 2, restSec: 240, holdSec: warmupTwo },
+      { round: 3, restSec: 300, holdSec: target },
+    ];
+    return {
+      kind,
+      title: 'PB attempt day',
+      summary: `One controlled max-attempt day. Suggested target: ${formatTime(target)}.`,
+      why: 'Your recent pattern is consistent enough that trying for a new best is reasonable instead of random.',
+      whenToStop: 'If your warmups feel off, abort the attempt and relabel today as technique.',
+      pbGuidance: 'This is the day. Only take one real shot, and only if the warmup rhythm stays clean.',
+      readyForPb: true,
+      tableRows: rows,
+      phases: [
+        { id: 'settle', kind: 'settle', label: 'Settle', durationSec: 240 },
+        { id: '1-hold', kind: 'hold', label: 'Warmup hold', durationSec: warmupOne, roundLabel: 'Warmup 1' },
+        { id: '1-rest', kind: 'recovery', label: 'Recover', durationSec: 180, roundLabel: 'Warmup 1' },
+        { id: '2-hold', kind: 'hold', label: 'Warmup hold', durationSec: warmupTwo, roundLabel: 'Warmup 2' },
+        { id: '2-rest', kind: 'recovery', label: 'Recover', durationSec: 240, roundLabel: 'Warmup 2' },
+        { id: '3-rest', kind: 'recovery', label: 'Long reset', durationSec: 300, roundLabel: 'Target' },
+        { id: '3-hold', kind: 'hold', label: 'Target hold', durationSec: target, roundLabel: 'Target' },
+      ],
+      cues: ['No forcing the warmup.', 'One clean shot only.', 'If signals are ugly, back off immediately.'],
+    };
+  }
+
+  const hold = Math.round(pbSec * 0.7);
+  const restStart = clamp(Math.round(pbSec * 0.95), 90, 180);
+  const restEnd = clamp(Math.round(pbSec * 0.28), 25, 60);
+  const rows = Array.from({ length: 8 }, (_, i) => ({
+    round: i + 1,
+    restSec: Math.round(restStart + ((restEnd - restStart) * i) / 7),
+    holdSec: hold,
+  }));
+  return {
+    kind,
+    title: 'CO₂ day',
+    summary: 'Same hold, shrinking rest. Urge-to-breathe tolerance day.',
+    why: 'This is the safest hard default when you need quality pressure without immediately chasing max depth in the hypoxic hole.',
+    whenToStop: 'Stop when posture and calm break down, not only when it hurts.',
+    pbGuidance: readyForPb
+      ? 'If this is solid and tomorrow is light, you are on a good runway for a PB attempt soon.'
+      : 'You are still building comfort under load before a serious PB attempt.',
+    readyForPb,
+    tableRows: rows,
+    phases: buildPhases(rows),
+    cues: ['Relax around contractions.', 'Keep the face blank and loose.', 'Do not speed up the breathe-up just because the rest shrinks.'],
+  };
+}
+
+function recommendKind(pbSec: number, logs: LogEntry[]) {
+  const sorted = sortLogs(logs);
+  const today = todayKey();
+  const last = getLastCompleted(sorted);
+  const daysSinceLast = last ? daysBetween(last.date, today) : 999;
+  const totalLast7 = recentCompleted(sorted, 7).length;
+  const hardLast3 = countKinds(sorted, ['co2', 'o2', 'pb'], 3);
+  const co2Last7 = countKinds(sorted, ['co2'], 7);
+  const o2Last7 = countKinds(sorted, ['o2'], 7);
+  const recoveryLast2 = countKinds(sorted, ['recovery', 'technique'], 2);
+  const lastPb = getLastPb(sorted);
+  const daysSincePb = lastPb ? daysBetween(lastPb.date, today) : 999;
+
+  if (!last) return 'technique';
+  if (daysSinceLast >= 3) return 'recovery';
+  if (daysSinceLast === 2) return 'technique';
+  if (hardLast3 >= 2) return 'recovery';
+  if (totalLast7 >= 4 && co2Last7 >= 1 && o2Last7 >= 1 && recoveryLast2 >= 1 && daysSincePb >= 7) return 'pb';
+  if (co2Last7 === 0) return 'co2';
+  if (o2Last7 === 0) return 'o2';
+  if (last.kind === 'co2') return 'recovery';
+  if (last.kind === 'recovery' || last.kind === 'technique') return 'o2';
+  if (last.kind === 'o2') return 'co2';
+  if (last.kind === 'pb') return 'recovery';
+  return pbSec >= 180 ? 'co2' : 'technique';
+}
+
+function effortColor(effort?: Effort) {
+  if (effort === 'easy') return '#86efac';
+  if (effort === 'hard') return '#fca5a5';
+  return '#93c5fd';
+}
+
+function formatLogTitle(log: LogEntry) {
+  const bits = [log.title];
+  if (log.bestHoldSec) bits.push(formatTime(log.bestHoldSec));
+  if (log.effort) bits.push(EFFORT_LABEL[log.effort]);
+  return bits.join(' · ');
 }
 
 export default function App() {
-  const [minutes, setMinutes] = useState('2');
-  const [seconds, setSeconds] = useState('30');
-  const [difficulty, setDifficulty] = useState<Difficulty>('intermediate');
-  const [focus, setFocus] = useState<Focus>('co2');
-  const [aggression, setAggression] = useState(60);
-  const [safetyConfirmed, setSafetyConfirmed] = useState(false);
+  const [pbMin, setPbMin] = useState('2');
+  const [pbSecInput, setPbSecInput] = useState('30');
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(true);
   const [running, setRunning] = useState(false);
   const [phaseIndex, setPhaseIndex] = useState(0);
   const [phaseRemaining, setPhaseRemaining] = useState(0);
   const [sessionComplete, setSessionComplete] = useState(false);
-  const [audioEnabled, setAudioEnabled] = useState(true);
+  const [resultEffort, setResultEffort] = useState<Effort>('solid');
+  const [resultHoldMin, setResultHoldMin] = useState('');
+  const [resultHoldSec, setResultHoldSec] = useState('');
+  const [resultNotes, setResultNotes] = useState('');
   const announcedPhaseIdRef = useRef<string | null>(null);
   const halfwayAnnouncedPhaseIdRef = useRef<string | null>(null);
   const lastHalfCueIndexRef = useRef<number | null>(null);
 
-  const pbSec = useMemo(() => {
-    const mins = Number.parseInt(minutes || '0', 10) || 0;
-    const secs = Number.parseInt(seconds || '0', 10) || 0;
-    return clamp(mins * 60 + secs, 45, 600);
-  }, [minutes, seconds]);
-
-  const plan = useMemo(() => createPlan(pbSec, difficulty, focus, aggression), [pbSec, difficulty, focus, aggression]);
+  const pbSec = useMemo(() => parseTime(pbMin, pbSecInput), [pbMin, pbSecInput]);
+  const recommendedKind = useMemo(() => recommendKind(pbSec, logs), [pbSec, logs]);
+  const plan = useMemo(() => buildPlan(recommendedKind, pbSec, logs), [recommendedKind, pbSec, logs]);
+  const currentPhase = plan.phases[phaseIndex];
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -435,6 +359,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    (async () => {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as StoredState;
+        const secs = parsed.pbSec ?? 150;
+        setPbMin(String(Math.floor(secs / 60)));
+        setPbSecInput(String(secs % 60).padStart(2, '0'));
+        setLogs(parsed.logs ?? []);
+      }
+      setLoaded(true);
+    })().catch(() => setLoaded(true));
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const payload: StoredState = { pbSec, logs };
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(payload)).catch(() => {});
+  }, [loaded, pbSec, logs]);
+
+  useEffect(() => {
     setRunning(false);
     setPhaseIndex(0);
     setPhaseRemaining(plan.phases[0]?.durationSec ?? 0);
@@ -443,28 +387,19 @@ export default function App() {
     halfwayAnnouncedPhaseIdRef.current = null;
   }, [plan]);
 
-  const currentPhase = plan.phases[phaseIndex];
-
   useEffect(() => {
     if (!running || !audioEnabled || !currentPhase) return;
     if (announcedPhaseIdRef.current === currentPhase.id) return;
-
     announcedPhaseIdRef.current = currentPhase.id;
     halfwayAnnouncedPhaseIdRef.current = null;
-
-    if (currentPhase.kind === 'hold') {
-      playCue(holdCue).catch(() => {});
-    } else if (currentPhase.kind === 'rest' || currentPhase.kind === 'recovery') {
-      playCue(breatheCue).catch(() => {});
-    }
+    if (currentPhase.kind === 'hold') playCue(holdCue).catch(() => {});
+    if (currentPhase.kind === 'rest' || currentPhase.kind === 'recovery') playCue(breatheCue).catch(() => {});
   }, [running, audioEnabled, currentPhase]);
 
   useEffect(() => {
     if (!running || !audioEnabled || !currentPhase) return;
-    if (currentPhase.kind !== 'hold') return;
-    if (currentPhase.durationSec < 20) return;
+    if (currentPhase.kind !== 'hold' || currentPhase.durationSec < 20) return;
     if (halfwayAnnouncedPhaseIdRef.current === currentPhase.id) return;
-
     const halfwayMark = Math.ceil(currentPhase.durationSec / 2);
     if (phaseRemaining === halfwayMark) {
       halfwayAnnouncedPhaseIdRef.current = currentPhase.id;
@@ -475,47 +410,32 @@ export default function App() {
   }, [running, audioEnabled, currentPhase, phaseRemaining]);
 
   useEffect(() => {
-    if (!running) return;
-    if (phaseRemaining <= 0) return;
-
-    const timer = setTimeout(() => {
-      setPhaseRemaining((current) => current - 1);
-    }, 1000);
-
+    if (!running || phaseRemaining <= 0) return;
+    const timer = setTimeout(() => setPhaseRemaining((current) => current - 1), 1000);
     return () => clearTimeout(timer);
   }, [running, phaseRemaining]);
 
   useEffect(() => {
     if (!running || phaseRemaining > 0) return;
-
     const nextIndex = phaseIndex + 1;
     if (nextIndex >= plan.phases.length) {
       setRunning(false);
       setSessionComplete(true);
       return;
     }
-
     setPhaseIndex(nextIndex);
     setPhaseRemaining(plan.phases[nextIndex].durationSec);
   }, [running, phaseRemaining, phaseIndex, plan.phases]);
 
   const totalSeconds = plan.phases.reduce((sum, phase) => sum + phase.durationSec, 0);
-  const elapsedSeconds =
-    plan.phases.slice(0, phaseIndex).reduce((sum, phase) => sum + phase.durationSec, 0) +
-    ((currentPhase?.durationSec ?? 0) - phaseRemaining);
+  const elapsedSeconds = plan.phases.slice(0, phaseIndex).reduce((sum, phase) => sum + phase.durationSec, 0) + ((currentPhase?.durationSec ?? 0) - phaseRemaining);
   const progress = totalSeconds > 0 ? clamp(elapsedSeconds / totalSeconds, 0, 1) : 0;
-  const riskStyle = RISK_STYLES[plan.risk];
 
   function startSession() {
-    if (!safetyConfirmed) return;
-    if (sessionComplete) {
+    setSessionComplete(false);
+    if (phaseRemaining <= 0) {
       setPhaseIndex(0);
       setPhaseRemaining(plan.phases[0]?.durationSec ?? 0);
-      setSessionComplete(false);
-    }
-    if (phaseRemaining <= 0 && plan.phases[0]) {
-      setPhaseIndex(0);
-      setPhaseRemaining(plan.phases[0].durationSec);
     }
     setRunning(true);
   }
@@ -533,40 +453,57 @@ export default function App() {
     halfwayAnnouncedPhaseIdRef.current = null;
   }
 
+  function saveLog(completed: boolean, kindOverride?: SessionKind) {
+    const bestHoldSec = resultHoldMin || resultHoldSec ? parseTime(resultHoldMin || '0', resultHoldSec || '0') : undefined;
+    const entry: LogEntry = {
+      id: `${Date.now()}`,
+      date: todayKey(),
+      kind: kindOverride ?? plan.kind,
+      title: kindOverride ? `${KIND_LABEL[kindOverride]} day` : plan.title,
+      completed,
+      effort: completed ? resultEffort : undefined,
+      bestHoldSec: completed ? bestHoldSec : undefined,
+      notes: resultNotes.trim() || undefined,
+    };
+    const nextLogs = [entry, ...logs.filter((log) => !(log.date === entry.date && log.kind === entry.kind))];
+    setLogs(nextLogs);
+    if (completed && bestHoldSec && bestHoldSec > pbSec) {
+      setPbMin(String(Math.floor(bestHoldSec / 60)));
+      setPbSecInput(String(bestHoldSec % 60).padStart(2, '0'));
+    }
+    setResultHoldMin('');
+    setResultHoldSec('');
+    setResultNotes('');
+    setResultEffort('solid');
+    setSessionComplete(false);
+    resetSession();
+  }
+
+  const todayLogged = logs.some((log) => log.date === todayKey());
+  const recentLogs = sortLogs(logs).slice(0, 8);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
         <View style={styles.heroCard}>
           <Text style={styles.eyebrow}>BreathHold Trainer</Text>
-          <Text style={styles.heroTitle}>Tables, timer, and spoken cues</Text>
+          <Text style={styles.heroTitle}>Today’s training, picked for you</Text>
           <Text style={styles.heroBody}>
-            Adaptive dry-table sessions for freedivers, with the same voice from your phone stack calling the key beats.
+            No mode soup. The app looks at your recent work, missed days, and PB timing, then gives you today’s best session.
           </Text>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Baseline</Text>
+          <Text style={styles.cardTitle}>Current PB</Text>
           <View style={styles.row}>
             <View style={styles.timeInputWrap}>
               <Text style={styles.inputLabel}>Minutes</Text>
-              <TextInput
-                value={minutes}
-                onChangeText={setMinutes}
-                keyboardType="number-pad"
-                style={styles.timeInput}
-                maxLength={2}
-              />
+              <TextInput value={pbMin} onChangeText={setPbMin} keyboardType="number-pad" style={styles.timeInput} maxLength={2} />
             </View>
             <View style={styles.timeInputWrap}>
               <Text style={styles.inputLabel}>Seconds</Text>
-              <TextInput
-                value={seconds}
-                onChangeText={setSeconds}
-                keyboardType="number-pad"
-                style={styles.timeInput}
-                maxLength={2}
-              />
+              <TextInput value={pbSecInput} onChangeText={setPbSecInput} keyboardType="number-pad" style={styles.timeInput} maxLength={2} />
             </View>
             <View style={styles.pbPill}>
               <Text style={styles.pbPillLabel}>PB</Text>
@@ -576,65 +513,24 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Session tuning</Text>
-          <Text style={styles.sectionLabel}>Difficulty</Text>
-          <View style={styles.choiceWrap}>
-            {(Object.keys(DIFFICULTY_PROFILES) as Difficulty[]).map((item) => (
-              <ChoiceChip
-                key={item}
-                label={DIFFICULTY_PROFILES[item].label}
-                active={difficulty === item}
-                onPress={() => setDifficulty(item)}
-              />
-            ))}
-          </View>
-          <Text style={styles.helperText}>{DIFFICULTY_PROFILES[difficulty].description}</Text>
-
-          <Text style={styles.sectionLabel}>Focus</Text>
-          <View style={styles.choiceWrap}>
-            {(Object.keys(FOCUS_LABELS) as Focus[]).map((item) => (
-              <ChoiceChip key={item} label={FOCUS_LABELS[item]} active={focus === item} onPress={() => setFocus(item)} />
-            ))}
-          </View>
-
-          <Text style={styles.sectionLabel}>Aggressiveness</Text>
-          <View style={styles.choiceWrap}>
-            {AGGRESSION_PRESETS.map((value) => (
-              <ChoiceChip
-                key={value}
-                label={`${value}%`}
-                active={aggression === value}
-                onPress={() => setAggression(value)}
-              />
-            ))}
-          </View>
-        </View>
-
-        <View style={styles.card}>
           <View style={styles.titleRow}>
             <View style={styles.titleTextWrap}>
               <Text style={styles.cardTitle}>{plan.title}</Text>
-              <Text style={styles.cardSubtitle}>{plan.subtitle}</Text>
+              <Text style={styles.cardSubtitle}>{plan.summary}</Text>
             </View>
-            <View style={[styles.riskBadge, { backgroundColor: riskStyle.bg }]}> 
-              <Text style={[styles.riskBadgeText, { color: riskStyle.color }]}>{riskStyle.label}</Text>
-            </View>
+            <View style={styles.kindBadge}><Text style={styles.kindBadgeText}>{KIND_LABEL[plan.kind]}</Text></View>
           </View>
-          <Text style={styles.bodyText}>{plan.rationale}</Text>
-          <Text style={styles.microSafety}>{plan.safetyLine}</Text>
-          <Pressable style={styles.confirmRow} onPress={() => setSafetyConfirmed((current) => !current)}>
-            <View style={[styles.checkbox, safetyConfirmed && styles.checkboxActive]}>
-              {safetyConfirmed ? <Text style={styles.checkboxMark}>✓</Text> : null}
-            </View>
-            <Text style={styles.confirmText}>Ready. I’m training dry and paying attention to my own signals.</Text>
-          </Pressable>
+          <Text style={styles.bodyText}>{plan.why}</Text>
+          <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
+          <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>PB guidance</Text><Text style={styles.infoBoxText}>{plan.pbGuidance}</Text></View>
+          <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Stop rule</Text><Text style={styles.infoBoxText}>{plan.whenToStop}</Text></View>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Round plan</Text>
+          <Text style={styles.cardTitle}>Today’s session</Text>
           {plan.tableRows.map((row) => (
-            <View key={row.label} style={styles.tableRow}>
-              <Text style={styles.tableRound}>{row.label}</Text>
+            <View key={`${row.round}`} style={styles.tableRow}>
+              <Text style={styles.tableRound}>Round {row.round}</Text>
               <View style={styles.tableTimes}>
                 <Text style={styles.tableTimeLabel}>Rest {formatTime(row.restSec)}</Text>
                 <Text style={styles.tableTimeValue}>Hold {formatTime(row.holdSec)}</Text>
@@ -645,80 +541,73 @@ export default function App() {
 
         <View style={styles.card}>
           <View style={styles.titleRow}>
-            <Text style={styles.cardTitle}>Guided timer</Text>
-            <Pressable onPress={() => setAudioEnabled((current) => !current)} style={styles.audioToggle}>
+            <Text style={styles.cardTitle}>Timer</Text>
+            <Pressable onPress={() => setAudioEnabled((v) => !v)} style={styles.audioToggle}>
               <Text style={styles.audioToggleText}>{audioEnabled ? 'Audio on' : 'Audio off'}</Text>
             </Pressable>
           </View>
-          <Text style={styles.helperText}>Voice cues: breathe, hold, and one of 100 randomized halfway encouragements.</Text>
+          <Text style={styles.helperText}>Breathe + hold cues, plus randomized halfway encouragement.</Text>
           <View style={styles.timerShell}>
-            <Text style={styles.timerPhase}>{sessionComplete ? 'COMPLETE' : formatPhaseKind(currentPhase?.kind ?? 'rest')}</Text>
+            <Text style={styles.timerPhase}>{sessionComplete ? 'COMPLETE' : currentPhase ? currentPhase.label.toUpperCase() : 'READY'}</Text>
             <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatTime(phaseRemaining)}</Text>
-            <Text style={styles.timerMeta}>{sessionComplete ? 'Recover fully.' : `${currentPhase?.roundLabel ?? 'Prep'} · ${currentPhase?.label ?? 'Ready'}`}</Text>
-            <View style={styles.progressBarTrack}>
-              <View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} />
-            </View>
-            <Text style={styles.progressCaption}>
-              {formatTime(elapsedSeconds)} elapsed · {formatTime(totalSeconds)} total
-            </Text>
+            <Text style={styles.timerMeta}>{sessionComplete ? 'Log the session below.' : `${currentPhase?.roundLabel ?? 'Prep'} · ${currentPhase?.label ?? 'Ready'}`}</Text>
+            <View style={styles.progressBarTrack}><View style={[styles.progressBarFill, { width: `${progress * 100}%` }]} /></View>
+            <Text style={styles.progressCaption}>{formatTime(elapsedSeconds)} elapsed · {formatTime(totalSeconds)} total</Text>
           </View>
-
           <View style={styles.buttonRow}>
-            <Pressable onPress={startSession} style={[styles.primaryButton, !safetyConfirmed && styles.buttonDisabled]}>
-              <Text style={styles.primaryButtonText}>{running ? 'Running…' : sessionComplete ? 'Restart' : 'Start'}</Text>
-            </Pressable>
-            <Pressable onPress={pauseSession} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>Pause</Text>
-            </Pressable>
-            <Pressable onPress={resetSession} style={styles.secondaryButton}>
-              <Text style={styles.secondaryButtonText}>Reset</Text>
-            </Pressable>
+            <Pressable onPress={startSession} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{running ? 'Running…' : sessionComplete ? 'Restart' : 'Start'}</Text></Pressable>
+            <Pressable onPress={pauseSession} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Pause</Text></Pressable>
+            <Pressable onPress={resetSession} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Reset</Text></Pressable>
           </View>
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Session cues</Text>
-          {plan.cues.map((item) => (
-            <View key={item} style={styles.bulletRow}>
-              <Text style={styles.bullet}>•</Text>
-              <Text style={styles.bulletText}>{item}</Text>
+          <Text style={styles.cardTitle}>Log today</Text>
+          <Text style={styles.helperText}>{todayLogged ? 'You already have a log for today. Saving again will replace the same session type.' : 'Log what happened so tomorrow gets smarter.'}</Text>
+          <Text style={styles.sectionLabel}>How did it feel?</Text>
+          <View style={styles.choiceWrap}>
+            {(['easy', 'solid', 'hard'] as Effort[]).map((item) => (
+              <Pressable key={item} onPress={() => setResultEffort(item)} style={[styles.choiceChip, resultEffort === item && styles.choiceChipActive]}>
+                <Text style={[styles.choiceChipText, resultEffort === item && styles.choiceChipTextActive]}>{EFFORT_LABEL[item]}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Text style={styles.sectionLabel}>Best hold today (optional)</Text>
+          <View style={styles.row}>
+            <View style={styles.timeInputWrap}>
+              <TextInput value={resultHoldMin} onChangeText={setResultHoldMin} keyboardType="number-pad" style={styles.smallInput} placeholder="mm" placeholderTextColor="#64748b" maxLength={2} />
             </View>
-          ))}
-          <Text style={[styles.cardTitle, styles.subsectionTitle]}>Quick notes</Text>
-          {plan.sessionNotes.map((item) => (
-            <View key={item} style={styles.bulletRow}>
-              <Text style={styles.bullet}>•</Text>
-              <Text style={styles.bulletText}>{item}</Text>
+            <View style={styles.timeInputWrap}>
+              <TextInput value={resultHoldSec} onChangeText={setResultHoldSec} keyboardType="number-pad" style={styles.smallInput} placeholder="ss" placeholderTextColor="#64748b" maxLength={2} />
             </View>
+          </View>
+          <Text style={styles.sectionLabel}>Notes</Text>
+          <TextInput value={resultNotes} onChangeText={setResultNotes} style={styles.notesInput} multiline placeholder="Early contractions, felt amazing, slept badly, etc." placeholderTextColor="#64748b" />
+          <View style={styles.buttonRow}>
+            <Pressable onPress={() => saveLog(true)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Log completed session</Text></Pressable>
+            <Pressable onPress={() => saveLog(true, 'recovery')} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Log rest day</Text></Pressable>
+            <Pressable onPress={() => saveLog(false)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Missed today</Text></Pressable>
+          </View>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Coach notes</Text>
+          {plan.cues.map((cue) => (
+            <View key={cue} style={styles.bulletRow}><Text style={styles.bullet}>•</Text><Text style={styles.bulletText}>{cue}</Text></View>
           ))}
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Weekly rhythm</Text>
-          {plan.weeklyPlan.map((item) => (
-            <View key={item.day} style={styles.weekRow}>
-              <Text style={styles.weekDay}>{item.day}</Text>
-              <View style={styles.weekTextWrap}>
-                <Text style={styles.weekTitle}>{item.title}</Text>
-                <Text style={styles.weekDetail}>{item.detail}</Text>
+          <Text style={styles.cardTitle}>Recent log</Text>
+          {recentLogs.length === 0 ? <Text style={styles.helperText}>No sessions logged yet. Once you start logging, recommendations will adapt automatically.</Text> : null}
+          {recentLogs.map((log) => (
+            <View key={log.id} style={styles.logRow}>
+              <View style={styles.logHeaderRow}>
+                <Text style={styles.logDate}>{log.date}</Text>
+                <Text style={[styles.logKind, { color: effortColor(log.effort) }]}>{KIND_LABEL[log.kind]}</Text>
               </View>
-            </View>
-          ))}
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Recovery</Text>
-          {plan.recovery.map((item) => (
-            <View key={item} style={styles.bulletRow}>
-              <Text style={styles.bullet}>•</Text>
-              <Text style={styles.bulletText}>{item}</Text>
-            </View>
-          ))}
-          <Text style={[styles.cardTitle, styles.subsectionTitle]}>8-week progression</Text>
-          {plan.progression.map((item) => (
-            <View key={item} style={styles.bulletRow}>
-              <Text style={styles.bullet}>•</Text>
-              <Text style={styles.bulletText}>{item}</Text>
+              <Text style={styles.logTitle}>{formatLogTitle(log)}</Text>
+              {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
             </View>
           ))}
         </View>
@@ -728,368 +617,66 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#08111f',
-  },
-  screen: {
-    flex: 1,
-  },
-  content: {
-    padding: 16,
-    paddingBottom: 40,
-    gap: 14,
-  },
-  heroCard: {
-    backgroundColor: '#0d1728',
-    borderRadius: 24,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#1f2c43',
-    gap: 10,
-  },
-  eyebrow: {
-    color: '#7dd3fc',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1.1,
-    textTransform: 'uppercase',
-  },
-  heroTitle: {
-    color: '#f8fafc',
-    fontSize: 28,
-    lineHeight: 32,
-    fontWeight: '800',
-  },
-  heroBody: {
-    color: '#cbd5e1',
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  card: {
-    backgroundColor: '#0d1728',
-    borderRadius: 20,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: '#1f2c43',
-    gap: 10,
-  },
-  cardTitle: {
-    color: '#f8fafc',
-    fontSize: 19,
-    fontWeight: '800',
-  },
-  subsectionTitle: {
-    marginTop: 6,
-    fontSize: 16,
-  },
-  cardSubtitle: {
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 19,
-  },
-  titleTextWrap: {
-    flex: 1,
-  },
-  row: {
-    flexDirection: 'row',
-    gap: 12,
-    alignItems: 'flex-end',
-    flexWrap: 'wrap',
-  },
-  timeInputWrap: {
-    flex: 1,
-    minWidth: 110,
-    gap: 6,
-  },
-  inputLabel: {
-    color: '#94a3b8',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  timeInput: {
-    backgroundColor: '#08111f',
-    borderColor: '#26364f',
-    borderWidth: 1,
-    borderRadius: 16,
-    color: '#f8fafc',
-    fontSize: 24,
-    fontWeight: '700',
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  pbPill: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 18,
-    backgroundColor: '#10233f',
-    minWidth: 92,
-  },
-  pbPillLabel: {
-    color: '#7dd3fc',
-    fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  pbPillValue: {
-    color: '#f8fafc',
-    fontSize: 24,
-    fontWeight: '800',
-  },
-  sectionLabel: {
-    color: '#e2e8f0',
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  choiceWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  choiceChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: '#0a1220',
-    borderWidth: 1,
-    borderColor: '#24354c',
-  },
-  choiceChipActive: {
-    backgroundColor: '#1d4ed8',
-    borderColor: '#60a5fa',
-  },
-  choiceChipText: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  choiceChipTextActive: {
-    color: '#eff6ff',
-  },
-  helperText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  riskBadge: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-  },
-  riskBadgeText: {
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  bodyText: {
-    color: '#dbe4f0',
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  microSafety: {
-    color: '#93c5fd',
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  confirmRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#0a1220',
-    borderRadius: 16,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#23334b',
-  },
-  checkbox: {
-    width: 24,
-    height: 24,
-    borderRadius: 7,
-    borderWidth: 1,
-    borderColor: '#5b6f8f',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  checkboxActive: {
-    backgroundColor: '#1d4ed8',
-    borderColor: '#60a5fa',
-  },
-  checkboxMark: {
-    color: '#eff6ff',
-    fontWeight: '900',
-  },
-  confirmText: {
-    flex: 1,
-    color: '#e2e8f0',
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '600',
-  },
-  tableRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 12,
-    alignItems: 'center',
-    backgroundColor: '#0a1220',
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  tableRound: {
-    color: '#f8fafc',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  tableTimes: {
-    alignItems: 'flex-end',
-    gap: 2,
-  },
-  tableTimeLabel: {
-    color: '#93c5fd',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  tableTimeValue: {
-    color: '#f8fafc',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  audioToggle: {
-    backgroundColor: '#122034',
-    borderWidth: 1,
-    borderColor: '#2a4060',
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  audioToggleText: {
-    color: '#dbeafe',
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  timerShell: {
-    backgroundColor: '#08111f',
-    borderRadius: 20,
-    padding: 18,
-    alignItems: 'center',
-    gap: 10,
-  },
-  timerPhase: {
-    color: '#7dd3fc',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1,
-  },
-  timerValue: {
-    color: '#f8fafc',
-    fontSize: 54,
-    fontWeight: '900',
-  },
-  timerMeta: {
-    color: '#cbd5e1',
-    fontSize: 14,
-    textAlign: 'center',
-  },
-  progressBarTrack: {
-    width: '100%',
-    height: 10,
-    backgroundColor: '#112032',
-    borderRadius: 999,
-    overflow: 'hidden',
-  },
-  progressBarFill: {
-    height: '100%',
-    backgroundColor: '#38bdf8',
-    borderRadius: 999,
-  },
-  progressCaption: {
-    color: '#94a3b8',
-    fontSize: 12,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 10,
-    flexWrap: 'wrap',
-  },
-  primaryButton: {
-    flex: 1,
-    minWidth: 120,
-    backgroundColor: '#2563eb',
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  buttonDisabled: {
-    opacity: 0.45,
-  },
-  primaryButtonText: {
-    color: '#eff6ff',
-    fontWeight: '800',
-    fontSize: 15,
-  },
-  secondaryButton: {
-    flex: 1,
-    minWidth: 90,
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    alignItems: 'center',
-    backgroundColor: '#122034',
-    borderWidth: 1,
-    borderColor: '#2a4060',
-  },
-  secondaryButtonText: {
-    color: '#dbeafe',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  bulletRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  bullet: {
-    color: '#7dd3fc',
-    fontSize: 16,
-    lineHeight: 20,
-  },
-  bulletText: {
-    flex: 1,
-    color: '#dbe4f0',
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  weekRow: {
-    flexDirection: 'row',
-    gap: 12,
-    alignItems: 'flex-start',
-    paddingVertical: 6,
-  },
-  weekDay: {
-    width: 42,
-    color: '#7dd3fc',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  weekTextWrap: {
-    flex: 1,
-    gap: 2,
-  },
-  weekTitle: {
-    color: '#f8fafc',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  weekDetail: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    lineHeight: 18,
-  },
+  safeArea: { flex: 1, backgroundColor: '#08111f' },
+  screen: { flex: 1 },
+  content: { padding: 16, paddingBottom: 40, gap: 14 },
+  heroCard: { backgroundColor: '#0d1728', borderRadius: 24, padding: 20, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
+  eyebrow: { color: '#7dd3fc', fontSize: 12, fontWeight: '700', letterSpacing: 1.1, textTransform: 'uppercase' },
+  heroTitle: { color: '#f8fafc', fontSize: 28, lineHeight: 32, fontWeight: '800' },
+  heroBody: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
+  card: { backgroundColor: '#0d1728', borderRadius: 20, padding: 18, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
+  cardTitle: { color: '#f8fafc', fontSize: 19, fontWeight: '800' },
+  cardSubtitle: { color: '#94a3b8', fontSize: 13, lineHeight: 19 },
+  titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+  titleTextWrap: { flex: 1 },
+  bodyText: { color: '#dbe4f0', fontSize: 14, lineHeight: 20 },
+  infoBox: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 4 },
+  infoBoxLabel: { color: '#7dd3fc', fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
+  infoBoxText: { color: '#dbe4f0', fontSize: 13, lineHeight: 19 },
+  row: { flexDirection: 'row', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' },
+  timeInputWrap: { flex: 1, minWidth: 100, gap: 6 },
+  inputLabel: { color: '#94a3b8', fontSize: 12, fontWeight: '600' },
+  timeInput: { backgroundColor: '#08111f', borderColor: '#26364f', borderWidth: 1, borderRadius: 16, color: '#f8fafc', fontSize: 24, fontWeight: '700', paddingHorizontal: 14, paddingVertical: 14 },
+  smallInput: { backgroundColor: '#08111f', borderColor: '#26364f', borderWidth: 1, borderRadius: 14, color: '#f8fafc', fontSize: 20, fontWeight: '700', paddingHorizontal: 14, paddingVertical: 12 },
+  notesInput: { backgroundColor: '#08111f', borderColor: '#26364f', borderWidth: 1, borderRadius: 14, color: '#f8fafc', fontSize: 14, minHeight: 88, paddingHorizontal: 14, paddingVertical: 12, textAlignVertical: 'top' },
+  pbPill: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 18, backgroundColor: '#10233f', minWidth: 92 },
+  pbPillLabel: { color: '#7dd3fc', fontSize: 12, fontWeight: '700', textTransform: 'uppercase' },
+  pbPillValue: { color: '#f8fafc', fontSize: 24, fontWeight: '800' },
+  kindBadge: { backgroundColor: '#13253e', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 8 },
+  kindBadgeText: { color: '#93c5fd', fontSize: 12, fontWeight: '800' },
+  tableRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, alignItems: 'center', backgroundColor: '#0a1220', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12 },
+  tableRound: { color: '#f8fafc', fontWeight: '700', fontSize: 14 },
+  tableTimes: { alignItems: 'flex-end', gap: 2 },
+  tableTimeLabel: { color: '#93c5fd', fontSize: 13, fontWeight: '600' },
+  tableTimeValue: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
+  audioToggle: { backgroundColor: '#122034', borderWidth: 1, borderColor: '#2a4060', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  audioToggleText: { color: '#dbeafe', fontSize: 12, fontWeight: '800' },
+  helperText: { color: '#94a3b8', fontSize: 13, lineHeight: 18 },
+  timerShell: { backgroundColor: '#08111f', borderRadius: 20, padding: 18, alignItems: 'center', gap: 10 },
+  timerPhase: { color: '#7dd3fc', fontSize: 12, fontWeight: '800', letterSpacing: 1 },
+  timerValue: { color: '#f8fafc', fontSize: 54, fontWeight: '900' },
+  timerMeta: { color: '#cbd5e1', fontSize: 14, textAlign: 'center' },
+  progressBarTrack: { width: '100%', height: 10, backgroundColor: '#112032', borderRadius: 999, overflow: 'hidden' },
+  progressBarFill: { height: '100%', backgroundColor: '#38bdf8', borderRadius: 999 },
+  progressCaption: { color: '#94a3b8', fontSize: 12 },
+  buttonRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  primaryButton: { flex: 1, minWidth: 120, backgroundColor: '#2563eb', borderRadius: 16, paddingHorizontal: 16, paddingVertical: 14, alignItems: 'center' },
+  primaryButtonText: { color: '#eff6ff', fontWeight: '800', fontSize: 15 },
+  secondaryButton: { flex: 1, minWidth: 100, borderRadius: 16, paddingHorizontal: 16, paddingVertical: 14, alignItems: 'center', backgroundColor: '#122034', borderWidth: 1, borderColor: '#2a4060' },
+  secondaryButtonText: { color: '#dbeafe', fontWeight: '700', fontSize: 15 },
+  sectionLabel: { color: '#e2e8f0', fontSize: 14, fontWeight: '700', marginTop: 4 },
+  choiceWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  choiceChip: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, backgroundColor: '#0a1220', borderWidth: 1, borderColor: '#24354c' },
+  choiceChipActive: { backgroundColor: '#1d4ed8', borderColor: '#60a5fa' },
+  choiceChipText: { color: '#cbd5e1', fontSize: 13, fontWeight: '700' },
+  choiceChipTextActive: { color: '#eff6ff' },
+  bulletRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  bullet: { color: '#7dd3fc', fontSize: 16, lineHeight: 20 },
+  bulletText: { flex: 1, color: '#dbe4f0', fontSize: 14, lineHeight: 20 },
+  logRow: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 4 },
+  logHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
+  logDate: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
+  logKind: { fontSize: 12, fontWeight: '800' },
+  logTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '700' },
+  logNotes: { color: '#cbd5e1', fontSize: 13, lineHeight: 18 },
 });
