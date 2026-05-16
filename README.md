@@ -7,7 +7,7 @@ A cross-platform Expo app for dry static freediving practice.
 - Generates adaptive **CO₂ tables**, **O₂ tables**, **technique sessions**, **PR prep**, and a **mixed weekly structure**
 - Lets you tune for **beginner / intermediate / expert** difficulty
 - Lets you adjust **aggressiveness**
-- Includes a built-in **guided round timer** with spoken **breathe**, **hold**, and **halfway** cues
+- Includes a built-in **guided round timer** with spoken **breathe**, **hold**, and **100 randomized halfway encouragement** cues
 - Surfaces concise recovery guidance and an **8-week progression**
 
 ## Safety framing

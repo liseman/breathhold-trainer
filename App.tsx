@@ -1,6 +1,7 @@
 import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { HALF_CUE_ASSETS } from './halfwayCues';
 import {
   Pressable,
   SafeAreaView,
@@ -68,7 +69,6 @@ type DifficultyProfile = {
 
 const breatheCue = require('./assets/audio/breathe.mp3');
 const holdCue = require('./assets/audio/hold.mp3');
-const halfwayCue = require('./assets/audio/halfway.mp3');
 
 const DIFFICULTY_PROFILES: Record<Difficulty, DifficultyProfile> = {
   beginner: {
@@ -393,6 +393,15 @@ async function playCue(source: number) {
   });
 }
 
+function pickRandomHalfCue(lastIndex: number | null) {
+  if (HALF_CUE_ASSETS.length === 1) return { asset: HALF_CUE_ASSETS[0], index: 0 };
+  let nextIndex = Math.floor(Math.random() * HALF_CUE_ASSETS.length);
+  while (lastIndex !== null && nextIndex === lastIndex) {
+    nextIndex = Math.floor(Math.random() * HALF_CUE_ASSETS.length);
+  }
+  return { asset: HALF_CUE_ASSETS[nextIndex], index: nextIndex };
+}
+
 export default function App() {
   const [minutes, setMinutes] = useState('2');
   const [seconds, setSeconds] = useState('30');
@@ -407,6 +416,7 @@ export default function App() {
   const [audioEnabled, setAudioEnabled] = useState(true);
   const announcedPhaseIdRef = useRef<string | null>(null);
   const halfwayAnnouncedPhaseIdRef = useRef<string | null>(null);
+  const lastHalfCueIndexRef = useRef<number | null>(null);
 
   const pbSec = useMemo(() => {
     const mins = Number.parseInt(minutes || '0', 10) || 0;
@@ -458,7 +468,9 @@ export default function App() {
     const halfwayMark = Math.ceil(currentPhase.durationSec / 2);
     if (phaseRemaining === halfwayMark) {
       halfwayAnnouncedPhaseIdRef.current = currentPhase.id;
-      playCue(halfwayCue).catch(() => {});
+      const { asset, index } = pickRandomHalfCue(lastHalfCueIndexRef.current);
+      lastHalfCueIndexRef.current = index;
+      playCue(asset).catch(() => {});
     }
   }, [running, audioEnabled, currentPhase, phaseRemaining]);
 
@@ -638,7 +650,7 @@ export default function App() {
               <Text style={styles.audioToggleText}>{audioEnabled ? 'Audio on' : 'Audio off'}</Text>
             </Pressable>
           </View>
-          <Text style={styles.helperText}>Voice cues: breathe, hold, and halfway through each hold.</Text>
+          <Text style={styles.helperText}>Voice cues: breathe, hold, and one of 100 randomized halfway encouragements.</Text>
           <View style={styles.timerShell}>
             <Text style={styles.timerPhase}>{sessionComplete ? 'COMPLETE' : formatPhaseKind(currentPhase?.kind ?? 'rest')}</Text>
             <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatTime(phaseRemaining)}</Text>
