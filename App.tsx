@@ -23,6 +23,7 @@ type LogEntry = {
   kind: SessionKind;
   title: string;
   completed: boolean;
+  inferred?: boolean;
   effort?: Effort;
   notes?: string;
   bestHoldSec?: number;
@@ -46,6 +47,7 @@ type DailyPlan = {
   kind: SessionKind;
   title: string;
   summary: string;
+  yesterdayContext?: string;
   why: string;
   whenToStop: string;
   pbGuidance: string;
@@ -78,6 +80,8 @@ const EFFORT_LABEL: Record<Effort, string> = {
   hard: 'Hard',
 };
 
+const REST_DAY_TITLE = 'Rest day';
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -99,6 +103,12 @@ function todayKey(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
 
+function addDays(dateKey: string, delta: number) {
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + delta);
+  return todayKey(date);
+}
+
 function daysBetween(a: string, b: string) {
   const start = new Date(`${a}T00:00:00Z`).getTime();
   const end = new Date(`${b}T00:00:00Z`).getTime();
@@ -107,6 +117,73 @@ function daysBetween(a: string, b: string) {
 
 function sortLogs(logs: LogEntry[]) {
   return [...logs].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function getLogForDate(logs: LogEntry[], date: string) {
+  return logs.find((log) => log.date === date) ?? null;
+}
+
+function makeRestDayLog(date: string, inferred = true): LogEntry {
+  return {
+    id: inferred ? `rest-${date}` : `${Date.now()}`,
+    date,
+    kind: 'recovery',
+    title: REST_DAY_TITLE,
+    completed: true,
+    inferred,
+    effort: 'easy',
+    notes: inferred ? 'Auto-logged rest day.' : undefined,
+  };
+}
+
+function normalizeLogs(logs: LogEntry[]) {
+  const sorted = sortLogs(logs);
+  const deduped: LogEntry[] = [];
+  const seenDates = new Set<string>();
+
+  for (const log of sorted) {
+    if (seenDates.has(log.date)) continue;
+    seenDates.add(log.date);
+    deduped.push(log);
+  }
+
+  if (deduped.length === 0) return deduped;
+
+  const oldest = deduped[deduped.length - 1]?.date;
+  if (!oldest) return deduped;
+
+  const byDate = new Map(deduped.map((log) => [log.date, log]));
+  const filled: LogEntry[] = [];
+  const end = addDays(todayKey(), -1);
+
+  for (let date = oldest; date <= end; date = addDays(date, 1)) {
+    filled.push(byDate.get(date) ?? makeRestDayLog(date));
+  }
+
+  const todayLog = byDate.get(todayKey());
+  if (todayLog) filled.push(todayLog);
+
+  return sortLogs(filled);
+}
+
+function analyzeNotes(notes?: string) {
+  const text = notes?.toLowerCase() ?? '';
+  return {
+    needsRecovery: /(bad sleep|slept badly|tired|fatigue|fatigued|sick|ill|dizzy|headache|stress|stressed|tight|rough|off)/.test(text),
+    feltStrong: /(easy|great|strong|fresh|smooth|good|amazing|solid|clean)/.test(text),
+  };
+}
+
+function describeYesterday(logs: LogEntry[], today = todayKey()) {
+  const yesterday = getLogForDate(logs, addDays(today, -1));
+  if (!yesterday) return 'Yesterday: none logged.';
+
+  const note = yesterday.notes?.trim();
+  const bits = [`Yesterday: ${KIND_LABEL[yesterday.kind]}`];
+  if (yesterday.inferred) bits.push('(assumed rest)');
+  if (yesterday.effort && !yesterday.inferred) bits.push(`· ${EFFORT_LABEL[yesterday.effort]}`);
+  if (note && note !== 'Auto-logged rest day.') bits.push(`· ${note}`);
+  return bits.join(' ');
 }
 
 function recentCompleted(logs: LogEntry[], days: number) {
@@ -153,15 +230,16 @@ function buildPhases(rows: TableRow[], holdLabel = 'Hold'): Phase[] {
 function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPlan {
   const sorted = sortLogs(logs);
   const today = todayKey();
+  const yesterday = getLogForDate(sorted, addDays(today, -1));
   const lastCompleted = getLastCompleted(sorted);
   const daysSinceLast = lastCompleted ? daysBetween(lastCompleted.date, today) : 999;
-  const hardLast3 = countKinds(sorted, ['co2', 'o2', 'pb'], 3);
   const totalLast7 = recentCompleted(sorted, 7).length;
   const co2Last7 = countKinds(sorted, ['co2'], 7);
   const o2Last7 = countKinds(sorted, ['o2'], 7);
   const lastPb = getLastPb(sorted);
   const daysSincePb = lastPb ? daysBetween(lastPb.date, today) : 999;
   const recentRecovery = countKinds(sorted, ['recovery', 'technique'], 3);
+  const yesterdayContext = describeYesterday(sorted, today);
   const readyForPb = totalLast7 >= 4 && co2Last7 >= 1 && o2Last7 >= 1 && recentRecovery >= 1 && daysSinceLast <= 1 && daysSincePb >= 7;
 
   if (kind === 'recovery') {
@@ -174,9 +252,12 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'Recovery day',
       summary: 'Keep it light or skip hard apnea entirely.',
+      yesterdayContext,
       why: daysSinceLast >= 3
         ? 'You had a gap, so the move is to re-enter smoothly instead of pretending nothing happened.'
-        : 'Your recent work is dense enough that adaptation beats adding more stress today.',
+        : yesterday?.notes && analyzeNotes(yesterday.notes).needsRecovery
+          ? 'Yesterday’s notes point to backing off and letting recovery do the work.'
+          : 'Your recent work is dense enough that adaptation beats adding more stress today.',
       whenToStop: 'If anything feels edgy or stale, stop after one or two easy holds.',
       pbGuidance: readyForPb
         ? 'You are close to PB-ready, but take the easy day first so tomorrow has a real chance to pop.'
@@ -195,7 +276,10 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'Technique session',
       summary: 'Easy statics to sharpen relaxation and efficiency.',
-      why: 'You either need a reset, a re-entry day, or a low-cost session that still moves the needle.',
+      yesterdayContext,
+      why: yesterday?.inferred
+        ? 'Yesterday was treated as rest, so today is a clean re-entry instead of a jump back into heavy work.'
+        : 'You either need a reset, a re-entry day, or a low-cost session that still moves the needle.',
       whenToStop: 'Stop once the smooth feeling disappears; do not turn a technique day into a grit day.',
       pbGuidance: readyForPb
         ? 'If this feels almost boring and tomorrow you still feel fresh, a PB attempt becomes reasonable.'
@@ -220,7 +304,10 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'O₂ day',
       summary: 'Fixed rest, rising holds. Controlled hypoxic work.',
-      why: 'You have enough recent base work that today can push range instead of just comfort.',
+      yesterdayContext,
+      why: yesterday?.kind === 'recovery' || yesterday?.kind === 'technique'
+        ? 'Yesterday stayed light enough that today can push range a bit.'
+        : 'You have enough recent base work that today can push range instead of just comfort.',
       whenToStop: 'Stop if the quality gets weird, not just when it gets hard.',
       pbGuidance: readyForPb
         ? 'If this session lands cleanly and tomorrow feels good, a PB attempt is on the table.'
@@ -245,6 +332,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'PB attempt day',
       summary: `One controlled max-attempt day. Suggested target: ${formatTime(target)}.`,
+      yesterdayContext,
       why: 'Your recent pattern is consistent enough that trying for a new best is reasonable instead of random.',
       whenToStop: 'If your warmups feel off, abort the attempt and relabel today as technique.',
       pbGuidance: 'This is the day. Only take one real shot, and only if the warmup rhythm stays clean.',
@@ -275,7 +363,10 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
     kind,
     title: 'CO₂ day',
     summary: 'Same hold, shrinking rest. Urge-to-breathe tolerance day.',
-    why: 'This is the safest hard default when you need quality pressure without immediately chasing max depth in the hypoxic hole.',
+    yesterdayContext,
+    why: yesterday?.kind === 'o2'
+      ? 'Yesterday pushed hypoxia, so today shifts the stress toward tolerance instead of repeating the same hit.'
+      : 'This is the safest hard default when you need quality pressure without immediately chasing max depth in the hypoxic hole.',
     whenToStop: 'Stop when posture and calm break down, not only when it hurts.',
     pbGuidance: readyForPb
       ? 'If this is solid and tomorrow is light, you are on a good runway for a PB attempt soon.'
@@ -290,6 +381,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
 function recommendKind(pbSec: number, logs: LogEntry[]) {
   const sorted = sortLogs(logs);
   const today = todayKey();
+  const yesterday = getLogForDate(sorted, addDays(today, -1));
   const last = getLastCompleted(sorted);
   const daysSinceLast = last ? daysBetween(last.date, today) : 999;
   const totalLast7 = recentCompleted(sorted, 7).length;
@@ -299,8 +391,18 @@ function recommendKind(pbSec: number, logs: LogEntry[]) {
   const recoveryLast2 = countKinds(sorted, ['recovery', 'technique'], 2);
   const lastPb = getLastPb(sorted);
   const daysSincePb = lastPb ? daysBetween(lastPb.date, today) : 999;
+  const yesterdayNotes = analyzeNotes(yesterday?.notes);
 
   if (!last) return 'technique';
+  if (yesterdayNotes.needsRecovery) return 'recovery';
+  if (yesterday?.kind === 'pb') return 'recovery';
+  if (yesterday?.kind === 'co2' && yesterday.effort === 'hard') return 'recovery';
+  if (yesterday?.kind === 'o2' && yesterday.effort === 'hard') return 'recovery';
+  if (yesterday?.inferred) return yesterdayNotes.feltStrong ? 'o2' : 'technique';
+  if ((yesterday?.kind === 'recovery' || yesterday?.kind === 'technique') && yesterdayNotes.feltStrong) {
+    if (totalLast7 >= 4 && co2Last7 >= 1 && o2Last7 >= 1 && recoveryLast2 >= 1 && daysSincePb >= 7) return 'pb';
+    return o2Last7 === 0 ? 'o2' : 'co2';
+  }
   if (daysSinceLast >= 3) return 'recovery';
   if (daysSinceLast === 2) return 'technique';
   if (hardLast3 >= 2) return 'recovery';
@@ -337,6 +439,7 @@ export default function App() {
   const [phaseIndex, setPhaseIndex] = useState(0);
   const [phaseRemaining, setPhaseRemaining] = useState(0);
   const [sessionComplete, setSessionComplete] = useState(false);
+  const [dailyOutcome, setDailyOutcome] = useState<'completed' | 'rest' | 'missed'>('completed');
   const [resultEffort, setResultEffort] = useState<Effort>('solid');
   const [resultHoldMin, setResultHoldMin] = useState('');
   const [resultHoldSec, setResultHoldSec] = useState('');
@@ -366,7 +469,7 @@ export default function App() {
         const secs = parsed.pbSec ?? 150;
         setPbMin(String(Math.floor(secs / 60)));
         setPbSecInput(String(secs % 60).padStart(2, '0'));
-        setLogs(parsed.logs ?? []);
+        setLogs(normalizeLogs(parsed.logs ?? []));
       }
       setLoaded(true);
     })().catch(() => setLoaded(true));
@@ -453,21 +556,26 @@ export default function App() {
     halfwayAnnouncedPhaseIdRef.current = null;
   }
 
-  function saveLog(completed: boolean, kindOverride?: SessionKind) {
-    const bestHoldSec = resultHoldMin || resultHoldSec ? parseTime(resultHoldMin || '0', resultHoldSec || '0') : undefined;
+  function submitDailyLog() {
+    const bestHoldSec = dailyOutcome === 'completed' && (resultHoldMin || resultHoldSec)
+      ? parseTime(resultHoldMin || '0', resultHoldSec || '0')
+      : undefined;
+    const isRestDay = dailyOutcome === 'rest';
+    const completed = dailyOutcome !== 'missed';
     const entry: LogEntry = {
       id: `${Date.now()}`,
       date: todayKey(),
-      kind: kindOverride ?? plan.kind,
-      title: kindOverride ? `${KIND_LABEL[kindOverride]} day` : plan.title,
+      kind: isRestDay ? 'recovery' : plan.kind,
+      title: isRestDay ? REST_DAY_TITLE : plan.title,
       completed,
-      effort: completed ? resultEffort : undefined,
-      bestHoldSec: completed ? bestHoldSec : undefined,
+      inferred: false,
+      effort: dailyOutcome === 'completed' ? resultEffort : undefined,
+      bestHoldSec,
       notes: resultNotes.trim() || undefined,
     };
-    const nextLogs = [entry, ...logs.filter((log) => !(log.date === entry.date && log.kind === entry.kind))];
+    const nextLogs = normalizeLogs([entry, ...logs.filter((log) => log.date !== entry.date)]);
     setLogs(nextLogs);
-    if (completed && bestHoldSec && bestHoldSec > pbSec) {
+    if (dailyOutcome === 'completed' && bestHoldSec && bestHoldSec > pbSec) {
       setPbMin(String(Math.floor(bestHoldSec / 60)));
       setPbSecInput(String(bestHoldSec % 60).padStart(2, '0'));
     }
@@ -475,6 +583,7 @@ export default function App() {
     setResultHoldSec('');
     setResultNotes('');
     setResultEffort('solid');
+    setDailyOutcome('completed');
     setSessionComplete(false);
     resetSession();
   }
@@ -486,14 +595,6 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
       <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-        <View style={styles.heroCard}>
-          <Text style={styles.eyebrow}>BreathHold Trainer</Text>
-          <Text style={styles.heroTitle}>Today’s training, picked for you</Text>
-          <Text style={styles.heroBody}>
-            No mode soup. The app looks at your recent work, missed days, and PB timing, then gives you today’s best session.
-          </Text>
-        </View>
-
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Current PB</Text>
           <View style={styles.row}>
@@ -520,9 +621,9 @@ export default function App() {
             </View>
             <View style={styles.kindBadge}><Text style={styles.kindBadgeText}>{KIND_LABEL[plan.kind]}</Text></View>
           </View>
-          <Text style={styles.bodyText}>{plan.why}</Text>
+          {plan.readyForPb ? <Text style={styles.readyText}>PB-ready runway is building.</Text> : null}
+          {plan.yesterdayContext ? <Text style={styles.helperText}>{plan.yesterdayContext}</Text> : null}
           <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
-          <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>PB guidance</Text><Text style={styles.infoBoxText}>{plan.pbGuidance}</Text></View>
           <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Stop rule</Text><Text style={styles.infoBoxText}>{plan.whenToStop}</Text></View>
         </View>
 
@@ -546,7 +647,6 @@ export default function App() {
               <Text style={styles.audioToggleText}>{audioEnabled ? 'Audio on' : 'Audio off'}</Text>
             </Pressable>
           </View>
-          <Text style={styles.helperText}>Breathe + hold cues, plus randomized halfway encouragement.</Text>
           <View style={styles.timerShell}>
             <Text style={styles.timerPhase}>{sessionComplete ? 'COMPLETE' : currentPhase ? currentPhase.label.toUpperCase() : 'READY'}</Text>
             <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatTime(phaseRemaining)}</Text>
@@ -563,7 +663,19 @@ export default function App() {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Log today</Text>
-          <Text style={styles.helperText}>{todayLogged ? 'You already have a log for today. Saving again will replace the same session type.' : 'Log what happened so tomorrow gets smarter.'}</Text>
+          <Text style={styles.helperText}>{todayLogged ? 'Today already has a log. Submitting again replaces it.' : 'One entry per day.'}</Text>
+          <Text style={styles.sectionLabel}>What happened today?</Text>
+          <View style={styles.choiceWrap}>
+            {[
+              ['completed', 'Completed'],
+              ['rest', 'Rest day'],
+              ['missed', 'Missed'],
+            ].map(([value, label]) => (
+              <Pressable key={value} onPress={() => setDailyOutcome(value as 'completed' | 'rest' | 'missed')} style={[styles.choiceChip, dailyOutcome === value && styles.choiceChipActive]}>
+                <Text style={[styles.choiceChipText, dailyOutcome === value && styles.choiceChipTextActive]}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
           <Text style={styles.sectionLabel}>How did it feel?</Text>
           <View style={styles.choiceWrap}>
             {(['easy', 'solid', 'hard'] as Effort[]).map((item) => (
@@ -572,7 +684,7 @@ export default function App() {
               </Pressable>
             ))}
           </View>
-          <Text style={styles.sectionLabel}>Best hold today (optional)</Text>
+          <Text style={styles.sectionLabel}>Best hold</Text>
           <View style={styles.row}>
             <View style={styles.timeInputWrap}>
               <TextInput value={resultHoldMin} onChangeText={setResultHoldMin} keyboardType="number-pad" style={styles.smallInput} placeholder="mm" placeholderTextColor="#64748b" maxLength={2} />
@@ -582,24 +694,13 @@ export default function App() {
             </View>
           </View>
           <Text style={styles.sectionLabel}>Notes</Text>
-          <TextInput value={resultNotes} onChangeText={setResultNotes} style={styles.notesInput} multiline placeholder="Early contractions, felt amazing, slept badly, etc." placeholderTextColor="#64748b" />
-          <View style={styles.buttonRow}>
-            <Pressable onPress={() => saveLog(true)} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Log completed session</Text></Pressable>
-            <Pressable onPress={() => saveLog(true, 'recovery')} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Log rest day</Text></Pressable>
-            <Pressable onPress={() => saveLog(false)} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Missed today</Text></Pressable>
-          </View>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Coach notes</Text>
-          {plan.cues.map((cue) => (
-            <View key={cue} style={styles.bulletRow}><Text style={styles.bullet}>•</Text><Text style={styles.bulletText}>{cue}</Text></View>
-          ))}
+          <TextInput value={resultNotes} onChangeText={setResultNotes} style={styles.notesInput} multiline placeholder="Optional" placeholderTextColor="#64748b" />
+          <Pressable onPress={submitDailyLog} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Submit daily log</Text></Pressable>
         </View>
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Recent log</Text>
-          {recentLogs.length === 0 ? <Text style={styles.helperText}>No sessions logged yet. Once you start logging, recommendations will adapt automatically.</Text> : null}
+          {recentLogs.length === 0 ? <Text style={styles.helperText}>No entries yet.</Text> : null}
           {recentLogs.map((log) => (
             <View key={log.id} style={styles.logRow}>
               <View style={styles.logHeaderRow}>
@@ -607,6 +708,7 @@ export default function App() {
                 <Text style={[styles.logKind, { color: effortColor(log.effort) }]}>{KIND_LABEL[log.kind]}</Text>
               </View>
               <Text style={styles.logTitle}>{formatLogTitle(log)}</Text>
+              {log.inferred ? <Text style={styles.logMeta}>Assumed rest day</Text> : null}
               {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
             </View>
           ))}
@@ -620,16 +722,12 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#08111f' },
   screen: { flex: 1 },
   content: { padding: 16, paddingBottom: 40, gap: 14 },
-  heroCard: { backgroundColor: '#0d1728', borderRadius: 24, padding: 20, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
-  eyebrow: { color: '#7dd3fc', fontSize: 12, fontWeight: '700', letterSpacing: 1.1, textTransform: 'uppercase' },
-  heroTitle: { color: '#f8fafc', fontSize: 28, lineHeight: 32, fontWeight: '800' },
-  heroBody: { color: '#cbd5e1', fontSize: 15, lineHeight: 22 },
   card: { backgroundColor: '#0d1728', borderRadius: 20, padding: 18, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
   cardTitle: { color: '#f8fafc', fontSize: 19, fontWeight: '800' },
   cardSubtitle: { color: '#94a3b8', fontSize: 13, lineHeight: 19 },
   titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   titleTextWrap: { flex: 1 },
-  bodyText: { color: '#dbe4f0', fontSize: 14, lineHeight: 20 },
+  readyText: { color: '#86efac', fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
   infoBox: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 4 },
   infoBoxLabel: { color: '#7dd3fc', fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
   infoBoxText: { color: '#dbe4f0', fontSize: 13, lineHeight: 19 },
@@ -670,13 +768,11 @@ const styles = StyleSheet.create({
   choiceChipActive: { backgroundColor: '#1d4ed8', borderColor: '#60a5fa' },
   choiceChipText: { color: '#cbd5e1', fontSize: 13, fontWeight: '700' },
   choiceChipTextActive: { color: '#eff6ff' },
-  bulletRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  bullet: { color: '#7dd3fc', fontSize: 16, lineHeight: 20 },
-  bulletText: { flex: 1, color: '#dbe4f0', fontSize: 14, lineHeight: 20 },
   logRow: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 4 },
   logHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
   logDate: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
   logKind: { fontSize: 12, fontWeight: '800' },
   logTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '700' },
+  logMeta: { color: '#93c5fd', fontSize: 12, fontWeight: '700' },
   logNotes: { color: '#cbd5e1', fontSize: 13, lineHeight: 18 },
 });
