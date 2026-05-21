@@ -742,6 +742,20 @@ export default function App() {
           {plan.readyForPb ? <Text style={styles.readyText}>PB-ready runway is building.</Text> : null}
           {plan.yesterdayContext ? <Text style={styles.helperText}>{plan.yesterdayContext}</Text> : null}
           <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
+          <View style={styles.workoutTable}>
+            <View style={styles.workoutHeaderRow}>
+              <Text style={styles.workoutHeaderText}>Round</Text>
+              <Text style={styles.workoutHeaderText}>Breathe</Text>
+              <Text style={styles.workoutHeaderText}>Hold</Text>
+            </View>
+            {plan.tableRows.map((row) => (
+              <View key={row.round} style={styles.workoutRow}>
+                <Text style={styles.workoutCell}>{row.round}</Text>
+                <Text style={styles.workoutCell}>{formatTime(row.restSec)}</Text>
+                <Text style={styles.workoutCell}>{formatTime(row.holdSec)}</Text>
+              </View>
+            ))}
+          </View>
         </View>
 
         <View style={styles.card}>
@@ -841,6 +855,11 @@ const styles = StyleSheet.create({
   infoBox: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 4 },
   infoBoxLabel: { color: '#7dd3fc', fontSize: 12, fontWeight: '700', textTransform: 'uppercase' },
   infoBoxText: { color: '#dbe4f0', fontSize: 14, lineHeight: 20 },
+  workoutTable: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 8 },
+  workoutHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, paddingBottom: 4, borderBottomWidth: 1, borderBottomColor: '#22344f' },
+  workoutHeaderText: { color: '#7dd3fc', fontSize: 12, fontWeight: '800', width: '30%', textTransform: 'uppercase' },
+  workoutRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  workoutCell: { color: '#f8fafc', fontSize: 14, fontWeight: '700', width: '30%' },
   row: { flexDirection: 'row', gap: 12, flexWrap: 'wrap' },
   timeInputWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#0a1220', borderRadius: 14, borderWidth: 1, borderColor: '#22344f', paddingHorizontal: 12, paddingVertical: 10 },
   smallInput: { color: '#f8fafc', minWidth: 32, fontSize: 18, fontWeight: '700' },
