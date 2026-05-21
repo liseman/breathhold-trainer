@@ -4,7 +4,7 @@ const REPO_NAME = process.env.GITHUB_REPOSITORY?.split('/')[1] || 'breathhold-tr
 const baseUrl = process.env.EXPO_PUBLIC_BASE_PATH || `/${REPO_NAME}`;
 
 const config: ExpoConfig = {
-  name: 'BreathHold Trainer',
+  name: 'Hold More',
   slug: 'breathhold-trainer',
   version: '1.0.0',
   orientation: 'portrait',

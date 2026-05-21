@@ -441,7 +441,6 @@ export default function App() {
   const [setupManualMin, setSetupManualMin] = useState('2');
   const [setupManualSec, setSetupManualSec] = useState('30');
   const [editorDate, setEditorDate] = useState(todayKey());
-  const [editorKind, setEditorKind] = useState<SessionKind>('technique');
   const [dailyOutcome, setDailyOutcome] = useState<DailyOutcome>('completed');
   const [resultEffort, setResultEffort] = useState<Effort>('solid');
   const [resultNotes, setResultNotes] = useState('');
@@ -612,20 +611,19 @@ export default function App() {
   function loadEditor(date: string) {
     const log = getLogForDate(logs, date);
     setEditorDate(date);
-    setEditorKind(log?.title === REST_DAY_TITLE ? 'recovery' : log?.kind ?? recommendedKind);
     setDailyOutcome(outcomeFromLog(log));
     setResultEffort(log?.effort ?? 'solid');
     setResultNotes(log?.notes === 'Auto-logged rest day.' ? '' : log?.notes ?? '');
     setEditorMessage('');
   }
 
+  function startHistoryEdit(date: string) {
+    loadEditor(date);
+  }
+
   useEffect(() => {
     if (loaded) loadEditor(todayKey());
   }, [loaded]);
-
-  function shiftEditorDate(delta: number) {
-    loadEditor(addDays(editorDate, delta));
-  }
 
   function saveLog() {
     if (!isValidDateKey(editorDate)) {
@@ -636,7 +634,12 @@ export default function App() {
       setEditorMessage('Can’t save future days.');
       return;
     }
-    const nextKind = dailyOutcome === 'rest' ? 'recovery' : editorKind;
+    const existingLog = getLogForDate(logs, editorDate);
+    const nextKind = dailyOutcome === 'rest'
+      ? 'recovery'
+      : editorDate === todayKey()
+        ? recommendedKind
+        : existingLog?.kind ?? recommendedKind;
     const entry: LogEntry = {
       id: `${editorDate}-${Date.now()}`,
       date: editorDate,
@@ -649,7 +652,7 @@ export default function App() {
     };
     const nextLogs = normalizeLogs([entry, ...logs.filter((log) => log.date !== editorDate)]);
     setLogs(nextLogs);
-    setEditorMessage(editorDate === todayKey() ? 'Saved today.' : `Saved ${editorDate}.`);
+    setEditorMessage(editorDate === todayKey() ? 'Saved session.' : `Saved ${editorDate}.`);
   }
 
   function savePbEdit() {
@@ -757,13 +760,13 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>{editorDate === todayKey() ? 'Log today' : `Edit ${editorDate}`}</Text>
-          <View style={styles.dateRow}>
-            <Pressable onPress={() => shiftEditorDate(-1)} style={styles.miniButton}><Text style={styles.miniButtonText}>←</Text></Pressable>
-            <TextInput value={editorDate} onChangeText={setEditorDate} style={styles.dateInput} autoCapitalize="none" autoCorrect={false} />
-            <Pressable onPress={() => loadEditor(editorDate)} style={styles.miniButton}><Text style={styles.miniButtonText}>Load</Text></Pressable>
-            <Pressable onPress={() => shiftEditorDate(1)} style={styles.miniButton}><Text style={styles.miniButtonText}>→</Text></Pressable>
-          </View>
+          <Text style={styles.cardTitle}>{editorDate === todayKey() ? 'Log session' : `Edit ${editorDate}`}</Text>
+          {editorDate !== todayKey() ? (
+            <View style={styles.editingRow}>
+              <Text style={styles.helperText}>Editing a history entry.</Text>
+              <Pressable onPress={() => loadEditor(todayKey())} style={styles.miniButton}><Text style={styles.miniButtonText}>Back to today</Text></Pressable>
+            </View>
+          ) : null}
           <Text style={styles.sectionLabel}>What happened?</Text>
           <View style={styles.choiceWrap}>
             {([
@@ -778,14 +781,6 @@ export default function App() {
           </View>
           {dailyOutcome === 'completed' ? (
             <>
-              <Text style={styles.sectionLabel}>Session</Text>
-              <View style={styles.choiceWrap}>
-                {(['technique', 'co2', 'o2', 'pb', 'recovery'] as SessionKind[]).map((kind) => (
-                  <Pressable key={kind} onPress={() => setEditorKind(kind)} style={[styles.choiceChip, editorKind === kind && styles.choiceChipActive]}>
-                    <Text style={[styles.choiceChipText, editorKind === kind && styles.choiceChipTextActive]}>{KIND_LABEL[kind]}</Text>
-                  </Pressable>
-                ))}
-              </View>
               <Text style={styles.sectionLabel}>How did it feel?</Text>
               <View style={styles.choiceWrap}>
                 {(['easy', 'solid', 'hard'] as Effort[]).map((item) => (
@@ -798,23 +793,26 @@ export default function App() {
           ) : null}
           <Text style={styles.sectionLabel}>Notes</Text>
           <TextInput value={resultNotes} onChangeText={setResultNotes} style={styles.notesInput} multiline placeholder="Optional" placeholderTextColor="#64748b" />
-          <Pressable onPress={saveLog} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Submit daily log</Text></Pressable>
+          <Pressable onPress={saveLog} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{editorDate === todayKey() ? 'Submit session log' : 'Save changes'}</Text></Pressable>
           {editorMessage ? <Text style={styles.helperText}>{editorMessage}</Text> : null}
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Recent log</Text>
+          <Text style={styles.cardTitle}>History</Text>
           {recentLogs.length === 0 ? <Text style={styles.helperText}>No entries yet.</Text> : null}
           {recentLogs.map((log) => (
-            <Pressable key={log.id} onPress={() => loadEditor(log.date)} style={styles.logRow}>
+            <View key={log.id} style={styles.logRow}>
               <View style={styles.logHeaderRow}>
                 <Text style={styles.logDate}>{log.date}</Text>
-                <Text style={[styles.logKind, { color: effortColor(log.effort) }]}>{KIND_LABEL[log.kind]}</Text>
+                <View style={styles.logHeaderActions}>
+                  <Text style={[styles.logKind, { color: effortColor(log.effort) }]}>{KIND_LABEL[log.kind]}</Text>
+                  <Pressable onPress={() => startHistoryEdit(log.date)} style={styles.historyEditButton}><Text style={styles.historyEditButtonText}>✎</Text></Pressable>
+                </View>
               </View>
               <Text style={styles.logTitle}>{formatLogTitle(log)}</Text>
               {log.inferred ? <Text style={styles.logMeta}>Assumed rest day</Text> : null}
               {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
-            </Pressable>
+            </View>
           ))}
         </View>
       </ScrollView>
@@ -864,14 +862,16 @@ const styles = StyleSheet.create({
   choiceChipText: { color: '#cbd5e1', fontSize: 13, fontWeight: '700' },
   choiceChipTextActive: { color: '#08111f' },
   notesInput: { minHeight: 92, borderRadius: 14, borderWidth: 1, borderColor: '#22344f', backgroundColor: '#0a1220', padding: 12, color: '#f8fafc', textAlignVertical: 'top' },
-  dateRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dateInput: { flex: 1, borderRadius: 14, borderWidth: 1, borderColor: '#22344f', backgroundColor: '#0a1220', paddingHorizontal: 12, paddingVertical: 10, color: '#f8fafc' },
+  editingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   miniButton: { borderRadius: 12, borderWidth: 1, borderColor: '#2a4060', backgroundColor: '#122034', paddingHorizontal: 12, paddingVertical: 10 },
   miniButtonText: { color: '#dbeafe', fontWeight: '800' },
   logRow: { backgroundColor: '#0a1220', borderRadius: 16, padding: 12, gap: 4 },
   logHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10 },
+  logHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   logDate: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
   logKind: { fontSize: 12, fontWeight: '800' },
+  historyEditButton: { width: 28, height: 28, borderRadius: 999, borderWidth: 1, borderColor: '#2a4060', alignItems: 'center', justifyContent: 'center', backgroundColor: '#122034' },
+  historyEditButtonText: { color: '#dbeafe', fontSize: 14, fontWeight: '700' },
   logTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '700' },
   logMeta: { color: '#93c5fd', fontSize: 12, fontWeight: '700' },
   logNotes: { color: '#cbd5e1', fontSize: 13, lineHeight: 18 },
