@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Audio } from 'expo-av';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -66,8 +67,12 @@ type StoredState = {
 
 const STORAGE_KEY = 'breathhold-trainer-v3';
 const REST_DAY_TITLE = 'Rest day';
+const REST_COUNTDOWN_CUES = [60, 30, 20, 10, 5, 4, 3, 2, 1] as const;
+const HOLD_COUNTDOWN_CUES: Record<number, string> = {
+  60: 'One minute left',
+  30: '30 left',
+};
 const breatheCue = require('./assets/audio/breathe.mp3');
-const holdCue = require('./assets/audio/hold.mp3');
 
 const KIND_LABEL: Record<SessionKind, string> = {
   technique: 'Technique',
@@ -220,6 +225,15 @@ async function playCue(source: number) {
     if ('didJustFinish' in status && status.didJustFinish) {
       sound.unloadAsync().catch(() => {});
     }
+  });
+}
+
+function speakCue(text: string, interrupt = true) {
+  if (interrupt) Speech.stop();
+  Speech.speak(text, {
+    language: 'en-US',
+    pitch: 1,
+    rate: 0.92,
   });
 }
 
@@ -447,6 +461,8 @@ export default function App() {
   const [editorMessage, setEditorMessage] = useState('');
   const announcedPhaseIdRef = useRef<string | null>(null);
   const halfwayAnnouncedPhaseIdRef = useRef<string | null>(null);
+  const announcedCountdownKeysRef = useRef<Set<string>>(new Set());
+  const pendingFollowupCueTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastHalfCueIndexRef = useRef<number | null>(null);
   const lastElapsedCueRef = useRef(0);
 
@@ -501,6 +517,11 @@ export default function App() {
     setSessionComplete(false);
     announcedPhaseIdRef.current = null;
     halfwayAnnouncedPhaseIdRef.current = null;
+    announcedCountdownKeysRef.current = new Set();
+    if (pendingFollowupCueTimeoutRef.current) {
+      clearTimeout(pendingFollowupCueTimeoutRef.current);
+      pendingFollowupCueTimeoutRef.current = null;
+    }
   }, [plan]);
 
   useEffect(() => {
@@ -514,11 +535,19 @@ export default function App() {
           clearInterval(timer);
           setRunning(false);
           setSessionComplete(true);
+          if (audioEnabled && currentPhase.kind === 'hold') {
+            speakCue('Done');
+          }
           return 0;
         }
         setPhaseIndex(nextIndex);
         announcedPhaseIdRef.current = null;
         halfwayAnnouncedPhaseIdRef.current = null;
+        announcedCountdownKeysRef.current = new Set();
+        if (pendingFollowupCueTimeoutRef.current) {
+          clearTimeout(pendingFollowupCueTimeoutRef.current);
+          pendingFollowupCueTimeoutRef.current = null;
+        }
         return nextPhase.durationSec;
       });
     }, 1000);
@@ -530,7 +559,11 @@ export default function App() {
     if (announcedPhaseIdRef.current === currentPhase.id) return;
     announcedPhaseIdRef.current = currentPhase.id;
     halfwayAnnouncedPhaseIdRef.current = null;
-    if (currentPhase.kind === 'hold') playCue(holdCue).catch(() => {});
+    announcedCountdownKeysRef.current = new Set();
+    if (pendingFollowupCueTimeoutRef.current) {
+      clearTimeout(pendingFollowupCueTimeoutRef.current);
+      pendingFollowupCueTimeoutRef.current = null;
+    }
     if (currentPhase.kind === 'rest' || currentPhase.kind === 'recovery') playCue(breatheCue).catch(() => {});
   }, [running, audioEnabled, currentPhase]);
 
@@ -539,6 +572,7 @@ export default function App() {
     if (currentPhase.kind !== 'hold' || currentPhase.durationSec < 20) return;
     if (halfwayAnnouncedPhaseIdRef.current === currentPhase.id) return;
     const halfwayMark = Math.ceil(currentPhase.durationSec / 2);
+    if (HOLD_COUNTDOWN_CUES[halfwayMark]) return;
     if (phaseRemaining === halfwayMark) {
       halfwayAnnouncedPhaseIdRef.current = currentPhase.id;
       const { asset, index } = pickRandomHalfCue(lastHalfCueIndexRef.current);
@@ -546,6 +580,43 @@ export default function App() {
       playCue(asset).catch(() => {});
     }
   }, [running, audioEnabled, currentPhase, phaseRemaining]);
+
+  useEffect(() => {
+    if (!running || !audioEnabled || !currentPhase) return;
+
+    const nextPhase = plan.phases[phaseIndex + 1];
+    const countdownKeys = announcedCountdownKeysRef.current;
+
+    if (currentPhase.kind === 'hold') {
+      const holdMessage = HOLD_COUNTDOWN_CUES[phaseRemaining];
+      const holdKey = `${currentPhase.id}:hold:${phaseRemaining}`;
+      if (holdMessage && !countdownKeys.has(holdKey)) {
+        countdownKeys.add(holdKey);
+        speakCue(holdMessage);
+      }
+      return;
+    }
+
+    if (nextPhase?.kind !== 'hold') return;
+
+    const restKey = `${currentPhase.id}:rest:${phaseRemaining}`;
+    if (REST_COUNTDOWN_CUES.includes(phaseRemaining as (typeof REST_COUNTDOWN_CUES)[number]) && !countdownKeys.has(restKey)) {
+      countdownKeys.add(restKey);
+      if (phaseRemaining === 1) {
+        speakCue('1');
+        const holdTransitionKey = `${currentPhase.id}:transition:hold`;
+        if (!countdownKeys.has(holdTransitionKey)) {
+          countdownKeys.add(holdTransitionKey);
+          pendingFollowupCueTimeoutRef.current = setTimeout(() => {
+            speakCue('Hold', false);
+            pendingFollowupCueTimeoutRef.current = null;
+          }, 650);
+        }
+      } else {
+        speakCue(phaseRemaining === 60 ? 'One minute' : String(phaseRemaining));
+      }
+    }
+  }, [running, audioEnabled, currentPhase, phaseIndex, phaseRemaining, plan.phases]);
 
   useEffect(() => {
     if (!maxHoldRunning) return;
@@ -572,6 +643,11 @@ export default function App() {
     setSessionComplete(false);
     announcedPhaseIdRef.current = null;
     halfwayAnnouncedPhaseIdRef.current = null;
+    announcedCountdownKeysRef.current = new Set();
+    if (pendingFollowupCueTimeoutRef.current) {
+      clearTimeout(pendingFollowupCueTimeoutRef.current);
+      pendingFollowupCueTimeoutRef.current = null;
+    }
   }
 
   function savePb(seconds: number) {
