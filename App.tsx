@@ -53,7 +53,7 @@ type DailyPlan = {
   title: string;
   summary: string;
   why: string;
-  yesterdayContext?: string;
+  totalWorkoutTime: string;
   readyForPb: boolean;
   phases: Phase[];
   tableRows: TableRow[];
@@ -201,14 +201,9 @@ function analyzeNotes(notes?: string) {
   };
 }
 
-function describeYesterday(logs: LogEntry[], today = todayKey()) {
-  const yesterday = getLogForDate(logs, addDays(today, -1));
-  if (!yesterday) return 'Yesterday: none logged';
-  const bits = [`Yesterday: ${KIND_LABEL[yesterday.kind]}`];
-  if (yesterday.inferred) bits.push('(assumed rest)');
-  if (yesterday.effort && !yesterday.inferred) bits.push(`· ${EFFORT_LABEL[yesterday.effort]}`);
-  if (yesterday.notes && yesterday.notes !== 'Auto-logged rest day.') bits.push(`· ${yesterday.notes}`);
-  return bits.join(' ');
+function describeTotalWorkoutTime(rows: TableRow[]) {
+  const totalSec = rows.reduce((sum, row) => sum + row.restSec + row.holdSec, 0);
+  return `Total workout time: ${formatTime(totalSec)}`;
 }
 
 function pickRandomHalfCue(lastIndex: number | null) {
@@ -256,7 +251,6 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
   const lastPb = getLastPb(sorted);
   const daysSincePb = lastPb ? daysBetween(lastPb.date, today) : 999;
   const recentRecovery = countKinds(sorted, ['recovery', 'technique'], 3);
-  const yesterdayContext = describeYesterday(sorted, today);
   const readyForPb = totalLast7 >= 4 && co2Last7 >= 1 && o2Last7 >= 1 && recentRecovery >= 1 && daysSinceLast <= 1 && daysSincePb >= 7;
 
   if (kind === 'recovery') {
@@ -269,7 +263,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'Recovery day',
       summary: 'Keep it light.',
-      yesterdayContext,
+      totalWorkoutTime: describeTotalWorkoutTime(rows),
       why: daysSinceLast >= 3
         ? 'You had a gap, so today should be a smooth re-entry.'
         : yesterday?.notes && analyzeNotes(yesterday.notes).needsRecovery
@@ -288,7 +282,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'Technique',
       summary: 'Easy statics. Clean form.',
-      yesterdayContext,
+      totalWorkoutTime: describeTotalWorkoutTime(rows),
       why: yesterday?.inferred
         ? 'Yesterday was treated as rest, so today is a clean re-entry.'
         : 'Low-cost work that still sharpens relaxation and efficiency.',
@@ -311,7 +305,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'O₂ day',
       summary: 'Fixed rest. Rising holds.',
-      yesterdayContext,
+      totalWorkoutTime: describeTotalWorkoutTime(rows),
       why: yesterday?.kind === 'recovery' || yesterday?.kind === 'technique'
         ? 'Yesterday stayed light enough that today can push range.'
         : 'You have enough recent base work to lean into hypoxic range today.',
@@ -334,7 +328,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       kind,
       title: 'PB attempt',
       summary: `Target ${formatTime(target)}. One clean shot.`,
-      yesterdayContext,
+      totalWorkoutTime: describeTotalWorkoutTime(rows),
       why: 'Your recent pattern is consistent enough to take a real shot.',
       readyForPb: true,
       phases: [
@@ -362,7 +356,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
     kind,
     title: 'CO₂ day',
     summary: 'Same hold. Shrinking rest.',
-    yesterdayContext,
+    totalWorkoutTime: describeTotalWorkoutTime(rows),
     why: yesterday?.kind === 'o2'
       ? 'Yesterday pushed hypoxia, so today shifts the stress toward tolerance.'
       : 'This is the safest hard default when you want pressure without going straight to max-range work.',
@@ -816,7 +810,7 @@ export default function App() {
             <View style={styles.kindBadge}><Text style={styles.kindBadgeText}>{KIND_LABEL[plan.kind]}</Text></View>
           </View>
           {plan.readyForPb ? <Text style={styles.readyText}>PB-ready runway is building.</Text> : null}
-          {plan.yesterdayContext ? <Text style={styles.helperText}>{plan.yesterdayContext}</Text> : null}
+          <Text style={styles.helperText}>{plan.totalWorkoutTime}</Text>
           <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
           <View style={styles.workoutTable}>
             <View style={styles.workoutHeaderRow}>
