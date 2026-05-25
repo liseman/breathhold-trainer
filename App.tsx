@@ -1,7 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -73,6 +72,21 @@ const HOLD_COUNTDOWN_CUES: Record<number, string> = {
   30: '30 left',
 };
 const breatheCue = require('./assets/audio/breathe.mp3');
+const promptCueAssets = {
+  Done: require('./assets/audio/prompts/done.mp3'),
+  Hold: require('./assets/audio/prompts/hold.mp3'),
+  '1': require('./assets/audio/prompts/1.mp3'),
+  '2': require('./assets/audio/prompts/2.mp3'),
+  '3': require('./assets/audio/prompts/3.mp3'),
+  '4': require('./assets/audio/prompts/4.mp3'),
+  '5': require('./assets/audio/prompts/5.mp3'),
+  '10': require('./assets/audio/prompts/10.mp3'),
+  '20': require('./assets/audio/prompts/20.mp3'),
+  '30': require('./assets/audio/prompts/30.mp3'),
+  'One minute': require('./assets/audio/prompts/one-minute.mp3'),
+  'One minute left': require('./assets/audio/prompts/one-minute-left.mp3'),
+  '30 left': require('./assets/audio/prompts/30-left.mp3'),
+} as const;
 
 const KIND_LABEL: Record<SessionKind, string> = {
   technique: 'Technique',
@@ -223,13 +237,8 @@ async function playCue(source: number) {
   });
 }
 
-function speakCue(text: string, interrupt = true) {
-  if (interrupt) Speech.stop();
-  Speech.speak(text, {
-    language: 'en-US',
-    pitch: 1,
-    rate: 0.92,
-  });
+function playPromptCue(prompt: keyof typeof promptCueAssets) {
+  return playCue(promptCueAssets[prompt]);
 }
 
 function buildPhases(rows: TableRow[], holdLabel = 'Hold'): Phase[] {
@@ -530,7 +539,7 @@ export default function App() {
           setRunning(false);
           setSessionComplete(true);
           if (audioEnabled && currentPhase.kind === 'hold') {
-            speakCue('Done');
+            playPromptCue('Done').catch(() => {});
           }
           return 0;
         }
@@ -586,7 +595,7 @@ export default function App() {
       const holdKey = `${currentPhase.id}:hold:${phaseRemaining}`;
       if (holdMessage && !countdownKeys.has(holdKey)) {
         countdownKeys.add(holdKey);
-        speakCue(holdMessage);
+        playPromptCue(holdMessage as keyof typeof promptCueAssets).catch(() => {});
       }
       return;
     }
@@ -597,17 +606,17 @@ export default function App() {
     if (REST_COUNTDOWN_CUES.includes(phaseRemaining as (typeof REST_COUNTDOWN_CUES)[number]) && !countdownKeys.has(restKey)) {
       countdownKeys.add(restKey);
       if (phaseRemaining === 1) {
-        speakCue('1');
+        playPromptCue('1').catch(() => {});
         const holdTransitionKey = `${currentPhase.id}:transition:hold`;
         if (!countdownKeys.has(holdTransitionKey)) {
           countdownKeys.add(holdTransitionKey);
           pendingFollowupCueTimeoutRef.current = setTimeout(() => {
-            speakCue('Hold', false);
+            playPromptCue('Hold').catch(() => {});
             pendingFollowupCueTimeoutRef.current = null;
           }, 650);
         }
       } else {
-        speakCue(phaseRemaining === 60 ? 'One minute' : String(phaseRemaining));
+        playPromptCue(phaseRemaining === 60 ? 'One minute' : String(phaseRemaining) as keyof typeof promptCueAssets).catch(() => {});
       }
     }
   }, [running, audioEnabled, currentPhase, phaseIndex, phaseRemaining, plan.phases]);
