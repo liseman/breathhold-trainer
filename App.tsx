@@ -17,7 +17,7 @@ import { HALF_CUE_ASSETS } from './halfwayCues';
 
 type SessionKind = 'technique' | 'co2' | 'o2' | 'pb' | 'recovery';
 type Effort = 'easy' | 'solid' | 'hard';
-type PhaseKind = 'rest' | 'hold' | 'recovery' | 'settle';
+type PhaseKind = 'rest' | 'hold' | 'recovery';
 type DailyOutcome = 'completed' | 'rest' | 'missed';
 type SetupMode = 'timer' | 'manual';
 
@@ -66,6 +66,8 @@ type StoredState = {
 
 const STORAGE_KEY = 'breathhold-trainer-v3';
 const REST_DAY_TITLE = 'Rest day';
+const MAX_WORKOUT_SEC = 30 * 60;
+const MAX_PB_SEC = 30 * 60;
 const REST_COUNTDOWN_CUES = [60, 30, 20, 10, 5, 4, 3, 2, 1] as const;
 const HOLD_COUNTDOWN_CUES: Record<number, string> = {
   60: 'One minute left',
@@ -116,7 +118,7 @@ function formatTime(totalSeconds: number) {
 function parseTime(mins: string, secs: string) {
   const m = Number.parseInt(mins || '0', 10) || 0;
   const s = Number.parseInt(secs || '0', 10) || 0;
-  return clamp(m * 60 + s, 0, 600);
+  return clamp(m * 60 + s, 0, MAX_PB_SEC);
 }
 
 function todayKey(date = new Date()) {
@@ -248,6 +250,61 @@ function buildPhases(rows: TableRow[], holdLabel = 'Hold'): Phase[] {
   ]);
 }
 
+function fitRowsWithinMax(rows: TableRow[], maxTotalSec: number) {
+  const totalSec = rows.reduce((sum, row) => sum + row.restSec + row.holdSec, 0);
+  if (totalSec <= maxTotalSec) return rows;
+
+  const scaled = rows.flatMap((row) => ([
+    {
+      round: row.round,
+      field: 'restSec' as const,
+      min: 15,
+      scaled: Math.max(15, Math.floor(row.restSec * (maxTotalSec / totalSec))),
+      target: row.restSec * (maxTotalSec / totalSec),
+    },
+    {
+      round: row.round,
+      field: 'holdSec' as const,
+      min: 20,
+      scaled: Math.max(20, Math.floor(row.holdSec * (maxTotalSec / totalSec))),
+      target: row.holdSec * (maxTotalSec / totalSec),
+    },
+  ]));
+
+  let currentTotal = scaled.reduce((sum, item) => sum + item.scaled, 0);
+
+  while (currentTotal > maxTotalSec) {
+    const candidate = scaled
+      .filter((item) => item.scaled > item.min)
+      .sort((a, b) => {
+        if (a.field !== b.field) return a.field === 'restSec' ? -1 : 1;
+        return (b.scaled - b.min) - (a.scaled - a.min);
+      })[0];
+    if (!candidate) break;
+    candidate.scaled -= 1;
+    currentTotal -= 1;
+  }
+
+  while (currentTotal < maxTotalSec) {
+    const candidate = [...scaled].sort((a, b) => {
+      const aFrac = a.target - Math.floor(a.target);
+      const bFrac = b.target - Math.floor(b.target);
+      if (Math.abs(bFrac - aFrac) > 0.0001) return bFrac - aFrac;
+      if (a.field !== b.field) return a.field === 'holdSec' ? -1 : 1;
+      return b.target - a.target;
+    })[0];
+    if (!candidate) break;
+    candidate.scaled += 1;
+    currentTotal += 1;
+  }
+
+  return rows.map((row) => {
+    const restSec = scaled.find((item) => item.round === row.round && item.field === 'restSec')?.scaled ?? row.restSec;
+    const holdSec = scaled.find((item) => item.round === row.round && item.field === 'holdSec')?.scaled ?? row.holdSec;
+    return { ...row, restSec, holdSec };
+  });
+}
+
 function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPlan {
   const sorted = sortLogs(logs);
   const today = todayKey();
@@ -263,11 +320,11 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
   const readyForPb = totalLast7 >= 4 && co2Last7 >= 1 && o2Last7 >= 1 && recentRecovery >= 1 && daysSinceLast <= 1 && daysSincePb >= 7;
 
   if (kind === 'recovery') {
-    const rows = [
+    const rows = fitRowsWithinMax([
       { round: 1, restSec: 120, holdSec: Math.round(pbSec * 0.42) },
       { round: 2, restSec: 120, holdSec: Math.round(pbSec * 0.42) },
       { round: 3, restSec: 120, holdSec: Math.round(pbSec * 0.42) },
-    ];
+    ], MAX_WORKOUT_SEC);
     return {
       kind,
       title: 'Recovery day',
@@ -279,14 +336,14 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
           ? 'Yesterday’s notes point to backing off.'
           : 'Your recent work is dense enough that recovery wins today.',
       readyForPb,
-      phases: [{ id: 'settle', kind: 'settle', label: 'Settle', durationSec: 120 }, ...buildPhases(rows, 'Easy hold')],
+      phases: buildPhases(rows, 'Easy hold'),
       tableRows: rows,
     };
   }
 
   if (kind === 'technique') {
     const hold = Math.round(pbSec * 0.52);
-    const rows = Array.from({ length: 5 }, (_, i) => ({ round: i + 1, restSec: 135, holdSec: hold }));
+    const rows = fitRowsWithinMax(Array.from({ length: 5 }, (_, i) => ({ round: i + 1, restSec: 135, holdSec: hold })), MAX_WORKOUT_SEC);
     return {
       kind,
       title: 'Technique',
@@ -296,7 +353,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
         ? 'Yesterday was treated as rest, so today is a clean re-entry.'
         : 'Low-cost work that still sharpens relaxation and efficiency.',
       readyForPb,
-      phases: [{ id: 'settle', kind: 'settle', label: 'Settle', durationSec: 120 }, ...buildPhases(rows, 'Easy hold')],
+      phases: buildPhases(rows, 'Easy hold'),
       tableRows: rows,
     };
   }
@@ -305,11 +362,11 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
     const restSec = clamp(Math.round(pbSec * 0.92), 90, 180);
     const start = Math.round(pbSec * 0.58);
     const end = Math.round(pbSec * 0.9);
-    const rows = Array.from({ length: 7 }, (_, i) => ({
+    const rows = fitRowsWithinMax(Array.from({ length: 7 }, (_, i) => ({
       round: i + 1,
       restSec,
       holdSec: Math.round(start + ((end - start) * i) / 6),
-    }));
+    })), MAX_WORKOUT_SEC);
     return {
       kind,
       title: 'O₂ day',
@@ -328,26 +385,25 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
     const warmupOne = Math.round(pbSec * 0.55);
     const warmupTwo = Math.round(pbSec * 0.82);
     const target = Math.round(pbSec * 1.02);
-    const rows = [
+    const rows = fitRowsWithinMax([
       { round: 1, restSec: 180, holdSec: warmupOne },
       { round: 2, restSec: 240, holdSec: warmupTwo },
       { round: 3, restSec: 300, holdSec: target },
-    ];
+    ], MAX_WORKOUT_SEC);
     return {
       kind,
       title: 'PB attempt',
-      summary: `Target ${formatTime(target)}. One clean shot.`,
+      summary: `Target ${formatTime(rows[2]?.holdSec ?? target)}. One clean shot.`,
       totalWorkoutTime: describeTotalWorkoutTime(rows),
       why: 'Your recent pattern is consistent enough to take a real shot.',
       readyForPb: true,
       phases: [
-        { id: 'settle', kind: 'settle', label: 'Settle', durationSec: 240 },
-        { id: '1-hold', kind: 'hold', label: 'Warmup hold', durationSec: warmupOne, roundLabel: 'Warmup 1' },
-        { id: '1-rest', kind: 'recovery', label: 'Recover', durationSec: 180, roundLabel: 'Warmup 1' },
-        { id: '2-hold', kind: 'hold', label: 'Warmup hold', durationSec: warmupTwo, roundLabel: 'Warmup 2' },
-        { id: '2-rest', kind: 'recovery', label: 'Recover', durationSec: 240, roundLabel: 'Warmup 2' },
-        { id: '3-rest', kind: 'recovery', label: 'Long reset', durationSec: 300, roundLabel: 'Target' },
-        { id: '3-hold', kind: 'hold', label: 'Target hold', durationSec: target, roundLabel: 'Target' },
+        { id: '1-hold', kind: 'hold', label: 'Warmup hold', durationSec: rows[0]?.holdSec ?? warmupOne, roundLabel: 'Warmup 1' },
+        { id: '1-rest', kind: 'recovery', label: 'Recover', durationSec: rows[0]?.restSec ?? 180, roundLabel: 'Warmup 1' },
+        { id: '2-hold', kind: 'hold', label: 'Warmup hold', durationSec: rows[1]?.holdSec ?? warmupTwo, roundLabel: 'Warmup 2' },
+        { id: '2-rest', kind: 'recovery', label: 'Recover', durationSec: rows[1]?.restSec ?? 240, roundLabel: 'Warmup 2' },
+        { id: '3-rest', kind: 'recovery', label: 'Long reset', durationSec: rows[2]?.restSec ?? 300, roundLabel: 'Target' },
+        { id: '3-hold', kind: 'hold', label: 'Target hold', durationSec: rows[2]?.holdSec ?? target, roundLabel: 'Target' },
       ],
       tableRows: rows,
     };
@@ -356,11 +412,11 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
   const hold = Math.round(pbSec * 0.7);
   const restStart = clamp(Math.round(pbSec * 0.95), 90, 180);
   const restEnd = clamp(Math.round(pbSec * 0.28), 25, 60);
-  const rows = Array.from({ length: 8 }, (_, i) => ({
+  const rows = fitRowsWithinMax(Array.from({ length: 8 }, (_, i) => ({
     round: i + 1,
     restSec: Math.round(restStart + ((restEnd - restStart) * i) / 7),
     holdSec: hold,
-  }));
+  })), MAX_WORKOUT_SEC);
   return {
     kind,
     title: 'CO₂ day',
@@ -624,10 +680,16 @@ export default function App() {
   useEffect(() => {
     if (!maxHoldRunning) return;
     const timer = setInterval(() => {
-      setMaxHoldElapsed((prev) => prev + 1);
+      setMaxHoldElapsed((prev) => Math.min(prev + 1, MAX_PB_SEC));
     }, 1000);
     return () => clearInterval(timer);
   }, [maxHoldRunning]);
+
+  useEffect(() => {
+    if (!maxHoldRunning || maxHoldElapsed < MAX_PB_SEC) return;
+    setMaxHoldRunning(false);
+    savePb(MAX_PB_SEC);
+  }, [maxHoldRunning, maxHoldElapsed]);
 
   useEffect(() => {
     if (!maxHoldRunning || !audioEnabled) return;
@@ -654,7 +716,7 @@ export default function App() {
   }
 
   function savePb(seconds: number) {
-    const safe = clamp(seconds, 45, 600);
+    const safe = clamp(seconds, 45, MAX_PB_SEC);
     setPbSec(safe);
     setPbDraftMin(String(Math.floor(safe / 60)));
     setPbDraftSec(String(safe % 60).padStart(2, '0'));
