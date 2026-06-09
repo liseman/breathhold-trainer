@@ -579,6 +579,10 @@ export default function App() {
     () => Math.max(...pbHistoryPreview.map((entry) => entry.pbSec), pbSec, 45),
     [pbHistoryPreview, pbSec],
   );
+  const minPbHistoryValue = useMemo(
+    () => Math.min(...pbHistoryPreview.map((entry) => entry.pbSec), pbSec, 45),
+    [pbHistoryPreview, pbSec],
+  );
   const todayWorkoutDone = dailyAssignment?.date === todayKey() && dailyAssignment.completed;
 
   useEffect(() => {
@@ -966,18 +970,37 @@ export default function App() {
         ) : null}
 
         <View style={styles.card}>
-          <Pressable
-            onPress={() => setExpandedSections((current) => ({ ...current, maxHold: !current.maxHold }))}
-            style={styles.collapseHeader}
-          >
+          <View style={styles.collapseHeader}>
             <View style={styles.titleTextWrap}>
               <Text style={styles.cardTitle}>Max hold</Text>
-              <Text style={styles.cardSubtitle}>{formatTime(pbSec)}</Text>
+              <Text style={styles.maxHoldValue}>{formatTime(pbSec)}</Text>
+              <Pressable
+                onPress={() => {
+                  setExpandedSections((current) => ({ ...current, maxHold: true }));
+                  setEditingPb(true);
+                }}
+                style={styles.inlineEditButton}
+              >
+                <Text style={styles.inlineEditButtonText}>Edit</Text>
+              </Pressable>
             </View>
-            <Text style={styles.collapseChevron}>{expandedSections.maxHold ? '−' : '+'}</Text>
-          </Pressable>
+            <Pressable
+              onPress={() => setExpandedSections((current) => ({ ...current, maxHold: !current.maxHold }))}
+              style={styles.chevronButton}
+            >
+              <Text style={styles.collapseChevron}>{expandedSections.maxHold ? '−' : '+'}</Text>
+            </Pressable>
+          </View>
           {expandedSections.maxHold ? (
             <>
+              <View style={styles.pbTrendHeader}>
+                <Text style={styles.pbTrendTitle}>Recent progress</Text>
+                <Text style={styles.pbTrendMeta}>
+                  {pbHistoryPreview.length > 1
+                    ? `${formatTime(pbHistoryPreview[0]?.pbSec ?? pbSec)} -> ${formatTime(pbHistoryPreview[pbHistoryPreview.length - 1]?.pbSec ?? pbSec)}`
+                    : 'First max hold logged'}
+                </Text>
+              </View>
               <View style={styles.pbGraph}>
                 {pbHistoryPreview.map((entry) => (
                   <View key={entry.at} style={styles.pbBarWrap}>
@@ -985,15 +1008,22 @@ export default function App() {
                       style={[
                         styles.pbBar,
                         {
-                          height: `${Math.max(18, (entry.pbSec / maxPbHistoryValue) * 100)}%`,
+                          height: `${Math.max(
+                            18,
+                            minPbHistoryValue === maxPbHistoryValue
+                              ? 52
+                              : 18 + (((entry.pbSec - minPbHistoryValue) / (maxPbHistoryValue - minPbHistoryValue)) * 50),
+                          )}%`,
                           opacity: entry.pbSec === pbSec ? 1 : 0.72,
                         },
                       ]}
                     />
-                    <Text style={styles.pbBarValue}>{formatTime(entry.pbSec)}</Text>
-                    <Text style={styles.pbBarLabel}>{formatMiniDateLabel(entry.at)}</Text>
                   </View>
                 ))}
+              </View>
+              <View style={styles.pbAxisRow}>
+                <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(pbHistoryPreview[0]?.at ?? new Date().toISOString())}</Text>
+                <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(pbHistoryPreview[pbHistoryPreview.length - 1]?.at ?? new Date().toISOString())}</Text>
               </View>
               <Pressable onPress={() => setEditingPb((value) => !value)} style={styles.secondaryButton}>
                 <Text style={styles.secondaryButtonText}>{editingPb ? 'Close editor' : 'Edit max hold'}</Text>
@@ -1164,15 +1194,22 @@ const styles = StyleSheet.create({
   cardSubtitle: { color: '#94a3b8', fontSize: 13, lineHeight: 19 },
   helperText: { color: '#94a3b8', fontSize: 13, lineHeight: 18 },
   collapseHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
+  chevronButton: { width: 36, height: 36, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
   collapseChevron: { color: '#dbeafe', fontSize: 28, fontWeight: '300', width: 24, textAlign: 'center' },
   titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   titleTextWrap: { flex: 1 },
+  maxHoldValue: { color: '#f8fafc', fontSize: 36, fontWeight: '900', lineHeight: 40, marginTop: 2 },
+  inlineEditButton: { alignSelf: 'flex-start', marginTop: 8, borderRadius: 999, borderWidth: 1, borderColor: '#2a4060', backgroundColor: '#122034', paddingHorizontal: 12, paddingVertical: 7 },
+  inlineEditButtonText: { color: '#dbeafe', fontSize: 13, fontWeight: '800' },
   inlineEditor: { backgroundColor: '#0d1728', borderRadius: 16, padding: 14, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
-  pbGraph: { minHeight: 168, borderRadius: 16, backgroundColor: '#0a1220', borderWidth: 1, borderColor: '#22344f', padding: 14, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 8 },
-  pbBarWrap: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', gap: 4, minHeight: 138 },
-  pbBar: { width: '100%', maxWidth: 26, borderRadius: 999, backgroundColor: '#38bdf8', minHeight: 20 },
-  pbBarValue: { color: '#dbeafe', fontSize: 11, fontWeight: '700' },
-  pbBarLabel: { color: '#64748b', fontSize: 10, fontWeight: '700' },
+  pbTrendHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 },
+  pbTrendTitle: { color: '#dbeafe', fontSize: 13, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
+  pbTrendMeta: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
+  pbGraph: { height: 84, borderRadius: 16, backgroundColor: '#0a1220', borderWidth: 1, borderColor: '#22344f', paddingHorizontal: 12, paddingVertical: 10, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 8 },
+  pbBarWrap: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: '100%' },
+  pbBar: { width: 12, borderRadius: 999, backgroundColor: '#38bdf8', minHeight: 10 },
+  pbAxisRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: -2 },
+  pbAxisLabel: { color: '#64748b', fontSize: 11, fontWeight: '700' },
   kindBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#122034', borderWidth: 1, borderColor: '#254263' },
   kindBadgeText: { color: '#dbeafe', fontSize: 12, fontWeight: '800' },
   readyText: { color: '#86efac', fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
