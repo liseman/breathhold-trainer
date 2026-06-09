@@ -972,17 +972,7 @@ export default function App() {
         <View style={styles.card}>
           <View style={styles.collapseHeader}>
             <View style={styles.titleTextWrap}>
-              <Text style={styles.cardTitle}>Max hold</Text>
-              <Text style={styles.maxHoldValue}>{formatTime(pbSec)}</Text>
-              <Pressable
-                onPress={() => {
-                  setExpandedSections((current) => ({ ...current, maxHold: true }));
-                  setEditingPb(true);
-                }}
-                style={styles.inlineEditButton}
-              >
-                <Text style={styles.inlineEditButtonText}>Edit</Text>
-              </Pressable>
+              <Text style={styles.maxHoldHeadline}>Max Hold: {formatTime(pbSec)}</Text>
             </View>
             <Pressable
               onPress={() => setExpandedSections((current) => ({ ...current, maxHold: !current.maxHold }))}
@@ -993,6 +983,9 @@ export default function App() {
           </View>
           {expandedSections.maxHold ? (
             <>
+              <Pressable onPress={() => setEditingPb((value) => !value)} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>{editingPb ? 'Close editor' : 'Edit'}</Text>
+              </Pressable>
               <View style={styles.pbTrendHeader}>
                 <Text style={styles.pbTrendTitle}>Recent progress</Text>
                 <Text style={styles.pbTrendMeta}>
@@ -1025,9 +1018,6 @@ export default function App() {
                 <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(pbHistoryPreview[0]?.at ?? new Date().toISOString())}</Text>
                 <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(pbHistoryPreview[pbHistoryPreview.length - 1]?.at ?? new Date().toISOString())}</Text>
               </View>
-              <Pressable onPress={() => setEditingPb((value) => !value)} style={styles.secondaryButton}>
-                <Text style={styles.secondaryButtonText}>{editingPb ? 'Close editor' : 'Edit max hold'}</Text>
-              </Pressable>
               {editingPb ? (
                 <View style={styles.inlineEditor}>
                   <View style={styles.row}>
@@ -1198,9 +1188,7 @@ const styles = StyleSheet.create({
   collapseChevron: { color: '#dbeafe', fontSize: 28, fontWeight: '300', width: 24, textAlign: 'center' },
   titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   titleTextWrap: { flex: 1 },
-  maxHoldValue: { color: '#f8fafc', fontSize: 36, fontWeight: '900', lineHeight: 40, marginTop: 2 },
-  inlineEditButton: { alignSelf: 'flex-start', marginTop: 8, borderRadius: 999, borderWidth: 1, borderColor: '#2a4060', backgroundColor: '#122034', paddingHorizontal: 12, paddingVertical: 7 },
-  inlineEditButtonText: { color: '#dbeafe', fontSize: 13, fontWeight: '800' },
+  maxHoldHeadline: { color: '#f8fafc', fontSize: 28, fontWeight: '900', lineHeight: 34 },
   inlineEditor: { backgroundColor: '#0d1728', borderRadius: 16, padding: 14, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
   pbTrendHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 },
   pbTrendTitle: { color: '#dbeafe', fontSize: 13, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
