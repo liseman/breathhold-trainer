@@ -6,9 +6,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const assetsRoot = path.join(projectRoot, 'assets', 'audio');
 const elapsedManifestPath = path.join(projectRoot, 'elapsedCues.ts');
+const overageManifestPath = path.join(projectRoot, 'pbOverageCues.ts');
 const voiceId = process.env.ELEVENLABS_VOICE_ID;
 const apiKey = process.env.ELEVENLABS_API_KEY;
 const maxElapsedSec = 30 * 60;
+const maxOverageSec = 300;
 
 if (!voiceId || !apiKey) {
   throw new Error('Set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID before running audio regeneration.');
@@ -120,8 +122,18 @@ async function rewriteElapsedManifest() {
   await fs.writeFile(elapsedManifestPath, contents);
 }
 
+async function rewriteOverageManifest() {
+  const lines = [];
+  for (let seconds = 10; seconds <= maxOverageSec; seconds += 10) {
+    lines.push(`  ${seconds}: require('./assets/audio/overage/${String(seconds).padStart(3, '0')}.mp3'),`);
+  }
+  const contents = `export const PB_OVERAGE_CUE_ASSETS = {\n${lines.join('\n')}\n} as const;\n`;
+  await fs.writeFile(overageManifestPath, contents);
+}
+
 async function main() {
   await rewriteElapsedManifest();
+  await rewriteOverageManifest();
 
   for (const [relativePath, text] of Object.entries(promptTexts)) {
     const outputPath = path.join(assetsRoot, relativePath);
@@ -133,6 +145,12 @@ async function main() {
     const relativePath = path.join('elapsed', `${String(seconds).padStart(3, '0')}.mp3`);
     console.log(`elapsed ${relativePath}`);
     await synthesizeToFile(formatElapsedText(seconds), path.join(assetsRoot, relativePath));
+  }
+
+  for (let seconds = 10; seconds <= maxOverageSec; seconds += 10) {
+    const relativePath = path.join('overage', `${String(seconds).padStart(3, '0')}.mp3`);
+    console.log(`overage ${relativePath}`);
+    await synthesizeToFile(`Plus ${seconds}.`, path.join(assetsRoot, relativePath));
   }
 
   const halfwayPrompts = buildHalfwayPrompts();

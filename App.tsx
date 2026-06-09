@@ -14,12 +14,14 @@ import {
 } from 'react-native';
 import { ELAPSED_CUE_ASSETS } from './elapsedCues';
 import { HALF_CUE_ASSETS } from './halfwayCues';
+import { PB_OVERAGE_CUE_ASSETS } from './pbOverageCues';
 
 type SessionKind = 'technique' | 'co2' | 'o2' | 'pb' | 'recovery';
 type Effort = 'easy' | 'solid' | 'hard';
 type PhaseKind = 'rest' | 'hold' | 'recovery';
 type DailyOutcome = 'completed' | 'rest' | 'missed';
 type SetupMode = 'timer' | 'manual';
+type ExpandKey = 'maxHold' | 'workout' | 'history';
 
 type LogEntry = {
   id: string;
@@ -58,10 +60,23 @@ type DailyPlan = {
   tableRows: TableRow[];
 };
 
+type DailyAssignment = {
+  date: string;
+  kind: SessionKind;
+  completed: boolean;
+};
+
+type PbHistoryEntry = {
+  at: string;
+  pbSec: number;
+};
+
 type StoredState = {
   pbSec: number;
   logs: LogEntry[];
   onboardingComplete?: boolean;
+  dailyAssignment?: DailyAssignment;
+  pbHistory?: PbHistoryEntry[];
 };
 
 const STORAGE_KEY = 'breathhold-trainer-v3';
@@ -143,6 +158,25 @@ function isValidDateKey(value: string) {
 
 function sortLogs(logs: LogEntry[]) {
   return [...logs].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function normalizePbHistory(history: PbHistoryEntry[] | undefined, fallbackPbSec: number) {
+  const normalized = (history ?? [])
+    .filter((entry) => Number.isFinite(entry.pbSec) && typeof entry.at === 'string' && entry.at.length > 0)
+    .sort((a, b) => a.at.localeCompare(b.at));
+
+  if (normalized.length > 0) return normalized;
+
+  return [{
+    at: new Date().toISOString(),
+    pbSec: clamp(fallbackPbSec, 45, MAX_PB_SEC),
+  }];
+}
+
+function formatMiniDateLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(5, 10);
+  return `${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
 }
 
 function getLogForDate(logs: LogEntry[], date: string) {
@@ -384,7 +418,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
   if (kind === 'pb') {
     const warmupOne = Math.round(pbSec * 0.55);
     const warmupTwo = Math.round(pbSec * 0.82);
-    const target = Math.round(pbSec * 1.02);
+    const target = clamp(pbSec + 180, Math.round(pbSec * 1.12), MAX_PB_SEC);
     const rows = fitRowsWithinMax([
       { round: 1, restSec: 180, holdSec: warmupOne },
       { round: 2, restSec: 240, holdSec: warmupTwo },
@@ -398,11 +432,11 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       why: 'Your recent pattern is consistent enough to take a real shot.',
       readyForPb: true,
       phases: [
+        { id: '0-rest', kind: 'rest', label: 'Breathe', durationSec: rows[0]?.restSec ?? 180, roundLabel: 'Warmup 1' },
         { id: '1-hold', kind: 'hold', label: 'Warmup hold', durationSec: rows[0]?.holdSec ?? warmupOne, roundLabel: 'Warmup 1' },
-        { id: '1-rest', kind: 'recovery', label: 'Recover', durationSec: rows[0]?.restSec ?? 180, roundLabel: 'Warmup 1' },
+        { id: '1-rest', kind: 'recovery', label: 'Recover', durationSec: rows[1]?.restSec ?? 240, roundLabel: 'Warmup 2' },
         { id: '2-hold', kind: 'hold', label: 'Warmup hold', durationSec: rows[1]?.holdSec ?? warmupTwo, roundLabel: 'Warmup 2' },
-        { id: '2-rest', kind: 'recovery', label: 'Recover', durationSec: rows[1]?.restSec ?? 240, roundLabel: 'Warmup 2' },
-        { id: '3-rest', kind: 'recovery', label: 'Long reset', durationSec: rows[2]?.restSec ?? 300, roundLabel: 'Target' },
+        { id: '2-rest', kind: 'recovery', label: 'Long reset', durationSec: rows[2]?.restSec ?? 300, roundLabel: 'Target' },
         { id: '3-hold', kind: 'hold', label: 'Target hold', durationSec: rows[2]?.holdSec ?? target, roundLabel: 'Target' },
       ],
       tableRows: rows,
@@ -504,6 +538,13 @@ export default function App() {
   const [pbDraftSec, setPbDraftSec] = useState('30');
   const [editingPb, setEditingPb] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [dailyAssignment, setDailyAssignment] = useState<DailyAssignment | null>(null);
+  const [pbHistory, setPbHistory] = useState<PbHistoryEntry[]>([]);
+  const [expandedSections, setExpandedSections] = useState<Record<ExpandKey, boolean>>({
+    maxHold: false,
+    workout: false,
+    history: false,
+  });
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [running, setRunning] = useState(false);
   const [phaseIndex, setPhaseIndex] = useState(0);
@@ -526,10 +567,19 @@ export default function App() {
   const lastElapsedCueRef = useRef(0);
 
   const recommendedKind = useMemo(() => recommendKind(pbSec, logs), [pbSec, logs]);
-  const plan = useMemo(() => buildPlan(recommendedKind, pbSec, logs), [recommendedKind, pbSec, logs]);
+  const assignedKind = dailyAssignment?.date === todayKey()
+    ? dailyAssignment.kind
+    : recommendedKind;
+  const plan = useMemo(() => buildPlan(assignedKind, pbSec, logs), [assignedKind, pbSec, logs]);
   const currentPhase = plan.phases[phaseIndex];
-  const selectedLog = useMemo(() => getLogForDate(logs, editorDate), [logs, editorDate]);
   const recentLogs = useMemo(() => sortLogs(logs).slice(0, 14), [logs]);
+  const loggedWorkoutCount = useMemo(() => logs.filter((log) => !log.inferred).length, [logs]);
+  const pbHistoryPreview = useMemo(() => normalizePbHistory(pbHistory, pbSec).slice(-7), [pbHistory, pbSec]);
+  const maxPbHistoryValue = useMemo(
+    () => Math.max(...pbHistoryPreview.map((entry) => entry.pbSec), pbSec, 45),
+    [pbHistoryPreview, pbSec],
+  );
+  const todayWorkoutDone = dailyAssignment?.date === todayKey() && dailyAssignment.completed;
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -551,7 +601,11 @@ export default function App() {
         setSetupManualMin(String(Math.floor(nextPb / 60)));
         setSetupManualSec(String(nextPb % 60).padStart(2, '0'));
         setLogs(normalizeLogs(parsed.logs ?? []));
+        setDailyAssignment(parsed.dailyAssignment ?? null);
+        setPbHistory(normalizePbHistory(parsed.pbHistory, nextPb));
         setOnboardingComplete(parsed.onboardingComplete ?? nextPb > 0);
+      } else {
+        setPbHistory(normalizePbHistory(undefined, 150));
       }
       setLoaded(true);
     })().catch(() => setLoaded(true));
@@ -559,9 +613,31 @@ export default function App() {
 
   useEffect(() => {
     if (!loaded) return;
-    const payload: StoredState = { pbSec, logs, onboardingComplete };
+    const payload: StoredState = { pbSec, logs, onboardingComplete, dailyAssignment: dailyAssignment ?? undefined, pbHistory };
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(payload)).catch(() => {});
-  }, [loaded, pbSec, logs, onboardingComplete]);
+  }, [loaded, pbSec, logs, onboardingComplete, dailyAssignment, pbHistory]);
+
+  useEffect(() => {
+    if (!loaded) return;
+
+    setDailyAssignment((current) => {
+      const today = todayKey();
+      const currentLog = getLogForDate(logs, today);
+
+      if (current?.date === today) {
+        if (currentLog?.completed && !current.completed) {
+          return { ...current, completed: true };
+        }
+        return current;
+      }
+
+      return {
+        date: today,
+        kind: currentLog?.kind ?? recommendedKind,
+        completed: Boolean(currentLog?.completed),
+      };
+    });
+  }, [loaded, logs, recommendedKind]);
 
   useEffect(() => {
     const active = running || maxHoldRunning;
@@ -594,6 +670,9 @@ export default function App() {
           clearInterval(timer);
           setRunning(false);
           setSessionComplete(true);
+          setDailyAssignment((current) => current && current.date === todayKey()
+            ? { ...current, completed: true }
+            : current);
           if (audioEnabled && currentPhase.kind === 'hold') {
             playPromptCue('Done').catch(() => {});
           }
@@ -678,6 +757,24 @@ export default function App() {
   }, [running, audioEnabled, currentPhase, phaseIndex, phaseRemaining, plan.phases]);
 
   useEffect(() => {
+    if (!running || !audioEnabled || !currentPhase) return;
+    if (plan.kind !== 'pb' || currentPhase.id !== '3-hold') return;
+
+    const countdownKeys = announcedCountdownKeysRef.current;
+    const elapsed = currentPhase.durationSec - phaseRemaining;
+    if (elapsed <= 0 || elapsed % 10 !== 0) return;
+
+    const cueKey = `${currentPhase.id}:plus:${elapsed}`;
+    if (countdownKeys.has(cueKey)) return;
+
+    const asset = PB_OVERAGE_CUE_ASSETS[elapsed as keyof typeof PB_OVERAGE_CUE_ASSETS];
+    if (!asset) return;
+
+    countdownKeys.add(cueKey);
+    playCue(asset).catch(() => {});
+  }, [running, audioEnabled, currentPhase, phaseRemaining, plan.kind]);
+
+  useEffect(() => {
     if (!maxHoldRunning) return;
     const timer = setInterval(() => {
       setMaxHoldElapsed((prev) => Math.min(prev + 1, MAX_PB_SEC));
@@ -717,11 +814,17 @@ export default function App() {
 
   function savePb(seconds: number) {
     const safe = clamp(seconds, 45, MAX_PB_SEC);
+    const now = new Date().toISOString();
     setPbSec(safe);
     setPbDraftMin(String(Math.floor(safe / 60)));
     setPbDraftSec(String(safe % 60).padStart(2, '0'));
     setSetupManualMin(String(Math.floor(safe / 60)));
     setSetupManualSec(String(safe % 60).padStart(2, '0'));
+    setPbHistory((current) => {
+      const history = normalizePbHistory(current, safe);
+      if (history[history.length - 1]?.pbSec === safe) return history;
+      return [...history, { at: now, pbSec: safe }];
+    });
     setEditingPb(false);
     setOnboardingComplete(true);
   }
@@ -737,6 +840,7 @@ export default function App() {
 
   function toggleSession() {
     if (!currentPhase) return;
+    if (todayWorkoutDone && !running) return;
     if (running) {
       setRunning(false);
       return;
@@ -779,7 +883,7 @@ export default function App() {
     const nextKind = dailyOutcome === 'rest'
       ? 'recovery'
       : editorDate === todayKey()
-        ? recommendedKind
+        ? assignedKind
         : existingLog?.kind ?? recommendedKind;
     const entry: LogEntry = {
       id: `${editorDate}-${Date.now()}`,
@@ -793,6 +897,15 @@ export default function App() {
     };
     const nextLogs = normalizeLogs([entry, ...logs.filter((log) => log.date !== editorDate)]);
     setLogs(nextLogs);
+    if (editorDate === todayKey()) {
+      setDailyAssignment((current) => current && current.date === editorDate
+        ? { ...current, completed: dailyOutcome !== 'missed' }
+        : {
+          date: editorDate,
+          kind: nextKind,
+          completed: dailyOutcome !== 'missed',
+        });
+    }
     setEditorMessage(editorDate === todayKey() ? 'Saved session.' : `Saved ${editorDate}.`);
   }
 
@@ -852,51 +965,97 @@ export default function App() {
           </View>
         ) : null}
 
-        <View style={styles.pbRow}>
-          <Text style={styles.pbText}>Max hold: {formatTime(pbSec)}</Text>
-          <Pressable onPress={() => setEditingPb((value) => !value)} style={styles.iconButton}><Text style={styles.iconButtonText}>✎</Text></Pressable>
-        </View>
-        {editingPb ? (
-          <View style={styles.inlineEditor}>
-            <View style={styles.row}>
-              <View style={styles.timeInputWrap}>
-                <TextInput value={pbDraftMin} onChangeText={setPbDraftMin} keyboardType="number-pad" style={styles.smallInput} placeholder="mm" placeholderTextColor="#64748b" maxLength={2} />
-                <Text style={styles.unitText}>min</Text>
-              </View>
-              <View style={styles.timeInputWrap}>
-                <TextInput value={pbDraftSec} onChangeText={setPbDraftSec} keyboardType="number-pad" style={styles.smallInput} placeholder="ss" placeholderTextColor="#64748b" maxLength={2} />
-                <Text style={styles.unitText}>sec</Text>
-              </View>
+        <View style={styles.card}>
+          <Pressable
+            onPress={() => setExpandedSections((current) => ({ ...current, maxHold: !current.maxHold }))}
+            style={styles.collapseHeader}
+          >
+            <View style={styles.titleTextWrap}>
+              <Text style={styles.cardTitle}>Max hold</Text>
+              <Text style={styles.cardSubtitle}>{formatTime(pbSec)}</Text>
             </View>
-            <Pressable onPress={savePbEdit} style={styles.secondaryButton}><Text style={styles.secondaryButtonText}>Save</Text></Pressable>
-          </View>
-        ) : null}
+            <Text style={styles.collapseChevron}>{expandedSections.maxHold ? '−' : '+'}</Text>
+          </Pressable>
+          {expandedSections.maxHold ? (
+            <>
+              <View style={styles.pbGraph}>
+                {pbHistoryPreview.map((entry) => (
+                  <View key={entry.at} style={styles.pbBarWrap}>
+                    <View
+                      style={[
+                        styles.pbBar,
+                        {
+                          height: `${Math.max(18, (entry.pbSec / maxPbHistoryValue) * 100)}%`,
+                          opacity: entry.pbSec === pbSec ? 1 : 0.72,
+                        },
+                      ]}
+                    />
+                    <Text style={styles.pbBarValue}>{formatTime(entry.pbSec)}</Text>
+                    <Text style={styles.pbBarLabel}>{formatMiniDateLabel(entry.at)}</Text>
+                  </View>
+                ))}
+              </View>
+              <Pressable onPress={() => setEditingPb((value) => !value)} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>{editingPb ? 'Close editor' : 'Edit max hold'}</Text>
+              </Pressable>
+              {editingPb ? (
+                <View style={styles.inlineEditor}>
+                  <View style={styles.row}>
+                    <View style={styles.timeInputWrap}>
+                      <TextInput value={pbDraftMin} onChangeText={setPbDraftMin} keyboardType="number-pad" style={styles.smallInput} placeholder="mm" placeholderTextColor="#64748b" maxLength={2} />
+                      <Text style={styles.unitText}>min</Text>
+                    </View>
+                    <View style={styles.timeInputWrap}>
+                      <TextInput value={pbDraftSec} onChangeText={setPbDraftSec} keyboardType="number-pad" style={styles.smallInput} placeholder="ss" placeholderTextColor="#64748b" maxLength={2} />
+                      <Text style={styles.unitText}>sec</Text>
+                    </View>
+                  </View>
+                  <Pressable onPress={savePbEdit} style={styles.primaryButton}><Text style={styles.primaryButtonText}>Save max hold</Text></Pressable>
+                </View>
+              ) : null}
+            </>
+          ) : null}
+        </View>
 
         <View style={styles.card}>
-          <View style={styles.titleRow}>
+          <Pressable
+            onPress={() => setExpandedSections((current) => ({ ...current, workout: !current.workout }))}
+            style={styles.collapseHeader}
+          >
             <View style={styles.titleTextWrap}>
-              <Text style={styles.cardTitle}>{plan.title}</Text>
-              <Text style={styles.cardSubtitle}>{plan.summary}</Text>
+              <Text style={styles.cardTitle}>Today&apos;s workout</Text>
+              <Text style={styles.cardSubtitle}>{plan.title} · {plan.totalWorkoutTime}</Text>
             </View>
-            <View style={styles.kindBadge}><Text style={styles.kindBadgeText}>{KIND_LABEL[plan.kind]}</Text></View>
-          </View>
-          {plan.readyForPb ? <Text style={styles.readyText}>PB-ready runway is building.</Text> : null}
-          <Text style={styles.helperText}>{plan.totalWorkoutTime}</Text>
-          <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
-          <View style={styles.workoutTable}>
-            <View style={styles.workoutHeaderRow}>
-              <Text style={styles.workoutHeaderText}>Round</Text>
-              <Text style={styles.workoutHeaderText}>Breathe</Text>
-              <Text style={styles.workoutHeaderText}>Hold</Text>
-            </View>
-            {plan.tableRows.map((row) => (
-              <View key={row.round} style={styles.workoutRow}>
-                <Text style={styles.workoutCell}>{row.round}</Text>
-                <Text style={styles.workoutCell}>{formatTime(row.restSec)}</Text>
-                <Text style={styles.workoutCell}>{formatTime(row.holdSec)}</Text>
+            <Text style={styles.collapseChevron}>{expandedSections.workout ? '−' : '+'}</Text>
+          </Pressable>
+          {expandedSections.workout ? (
+            <>
+              <View style={styles.titleRow}>
+                <View style={styles.titleTextWrap}>
+                  <Text style={styles.cardTitle}>{plan.title}</Text>
+                  <Text style={styles.cardSubtitle}>{plan.summary}</Text>
+                </View>
+                <View style={styles.kindBadge}><Text style={styles.kindBadgeText}>{KIND_LABEL[plan.kind]}</Text></View>
               </View>
-            ))}
-          </View>
+              {plan.readyForPb ? <Text style={styles.readyText}>PB-ready runway is building.</Text> : null}
+              <Text style={styles.helperText}>{dailyAssignment?.date === todayKey() ? 'Locked for today.' : plan.totalWorkoutTime}</Text>
+              <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
+              <View style={styles.workoutTable}>
+                <View style={styles.workoutHeaderRow}>
+                  <Text style={styles.workoutHeaderText}>Round</Text>
+                  <Text style={styles.workoutHeaderText}>Breathe</Text>
+                  <Text style={styles.workoutHeaderText}>Hold</Text>
+                </View>
+                {plan.tableRows.map((row) => (
+                  <View key={row.round} style={styles.workoutRow}>
+                    <Text style={styles.workoutCell}>{row.round}</Text>
+                    <Text style={styles.workoutCell}>{formatTime(row.restSec)}</Text>
+                    <Text style={styles.workoutCell}>{formatTime(row.holdSec)}</Text>
+                  </View>
+                ))}
+              </View>
+            </>
+          ) : null}
         </View>
 
         <View style={styles.card}>
@@ -911,7 +1070,15 @@ export default function App() {
             <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatTime(phaseRemaining)}</Text>
             <Text style={styles.timerRound}>{currentPhase?.roundLabel ?? plan.title}</Text>
           </View>
-          <Pressable onPress={toggleSession} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{running ? 'Stop' : 'Start'}</Text></Pressable>
+          <Pressable
+            onPress={toggleSession}
+            disabled={!running && todayWorkoutDone}
+            style={[styles.primaryButton, !running && todayWorkoutDone && styles.primaryButtonDisabled]}
+          >
+            <Text style={[styles.primaryButtonText, !running && todayWorkoutDone && styles.primaryButtonTextDisabled]}>
+              {running ? 'Stop' : todayWorkoutDone ? 'Done' : 'Start'}
+            </Text>
+          </Pressable>
         </View>
 
         <View style={styles.card}>
@@ -953,22 +1120,35 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>History</Text>
-          {recentLogs.length === 0 ? <Text style={styles.helperText}>No entries yet.</Text> : null}
-          {recentLogs.map((log) => (
-            <View key={log.id} style={styles.logRow}>
-              <View style={styles.logHeaderRow}>
-                <Text style={styles.logDate}>{log.date}</Text>
-                <View style={styles.logHeaderActions}>
-                  <Text style={[styles.logKind, { color: effortColor(log.effort) }]}>{KIND_LABEL[log.kind]}</Text>
-                  <Pressable onPress={() => startHistoryEdit(log.date)} style={styles.historyEditButton}><Text style={styles.historyEditButtonText}>✎</Text></Pressable>
-                </View>
-              </View>
-              <Text style={styles.logTitle}>{formatLogTitle(log)}</Text>
-              {log.inferred ? <Text style={styles.logMeta}>Assumed rest day</Text> : null}
-              {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
+          <Pressable
+            onPress={() => setExpandedSections((current) => ({ ...current, history: !current.history }))}
+            style={styles.collapseHeader}
+          >
+            <View style={styles.titleTextWrap}>
+              <Text style={styles.cardTitle}>History</Text>
+              <Text style={styles.cardSubtitle}>{loggedWorkoutCount} workouts</Text>
             </View>
-          ))}
+            <Text style={styles.collapseChevron}>{expandedSections.history ? '−' : '+'}</Text>
+          </Pressable>
+          {expandedSections.history ? (
+            <>
+              {recentLogs.length === 0 ? <Text style={styles.helperText}>No entries yet.</Text> : null}
+              {recentLogs.map((log) => (
+                <View key={log.id} style={styles.logRow}>
+                  <View style={styles.logHeaderRow}>
+                    <Text style={styles.logDate}>{log.date}</Text>
+                    <View style={styles.logHeaderActions}>
+                      <Text style={[styles.logKind, { color: effortColor(log.effort) }]}>{KIND_LABEL[log.kind]}</Text>
+                      <Pressable onPress={() => startHistoryEdit(log.date)} style={styles.historyEditButton}><Text style={styles.historyEditButtonText}>✎</Text></Pressable>
+                    </View>
+                  </View>
+                  <Text style={styles.logTitle}>{formatLogTitle(log)}</Text>
+                  {log.inferred ? <Text style={styles.logMeta}>Assumed rest day</Text> : null}
+                  {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
+                </View>
+              ))}
+            </>
+          ) : null}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -983,13 +1163,16 @@ const styles = StyleSheet.create({
   cardTitle: { color: '#f8fafc', fontSize: 19, fontWeight: '800' },
   cardSubtitle: { color: '#94a3b8', fontSize: 13, lineHeight: 19 },
   helperText: { color: '#94a3b8', fontSize: 13, lineHeight: 18 },
+  collapseHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
+  collapseChevron: { color: '#dbeafe', fontSize: 28, fontWeight: '300', width: 24, textAlign: 'center' },
   titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   titleTextWrap: { flex: 1 },
-  pbRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4 },
-  pbText: { color: '#f8fafc', fontSize: 18, fontWeight: '800' },
-  iconButton: { width: 34, height: 34, borderRadius: 999, borderWidth: 1, borderColor: '#2a4060', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0d1728' },
-  iconButtonText: { color: '#dbeafe', fontSize: 16, fontWeight: '700' },
   inlineEditor: { backgroundColor: '#0d1728', borderRadius: 16, padding: 14, borderWidth: 1, borderColor: '#1f2c43', gap: 10 },
+  pbGraph: { minHeight: 168, borderRadius: 16, backgroundColor: '#0a1220', borderWidth: 1, borderColor: '#22344f', padding: 14, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 8 },
+  pbBarWrap: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', gap: 4, minHeight: 138 },
+  pbBar: { width: '100%', maxWidth: 26, borderRadius: 999, backgroundColor: '#38bdf8', minHeight: 20 },
+  pbBarValue: { color: '#dbeafe', fontSize: 11, fontWeight: '700' },
+  pbBarLabel: { color: '#64748b', fontSize: 10, fontWeight: '700' },
   kindBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: '#122034', borderWidth: 1, borderColor: '#254263' },
   kindBadgeText: { color: '#dbeafe', fontSize: 12, fontWeight: '800' },
   readyText: { color: '#86efac', fontSize: 12, fontWeight: '800', textTransform: 'uppercase' },
@@ -1011,6 +1194,8 @@ const styles = StyleSheet.create({
   timerRound: { color: '#94a3b8', fontSize: 14, fontWeight: '600' },
   primaryButton: { backgroundColor: '#38bdf8', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
   primaryButtonText: { color: '#08111f', fontSize: 16, fontWeight: '900' },
+  primaryButtonDisabled: { backgroundColor: '#1e293b' },
+  primaryButtonTextDisabled: { color: '#94a3b8' },
   secondaryButton: { backgroundColor: '#122034', borderRadius: 16, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: '#2a4060' },
   secondaryButtonText: { color: '#dbeafe', fontSize: 14, fontWeight: '800' },
   audioToggle: { backgroundColor: '#122034', borderWidth: 1, borderColor: '#2a4060', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
