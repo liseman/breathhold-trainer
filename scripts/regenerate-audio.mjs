@@ -9,6 +9,9 @@ const elapsedManifestPath = path.join(projectRoot, 'elapsedCues.ts');
 const overageManifestPath = path.join(projectRoot, 'pbOverageCues.ts');
 const voiceId = process.env.ELEVENLABS_VOICE_ID;
 const apiKey = process.env.ELEVENLABS_API_KEY;
+const modelId = process.env.ELEVENLABS_MODEL_ID ?? 'eleven_flash_v2';
+const languageCode = process.env.ELEVENLABS_LANGUAGE_CODE ?? 'en';
+const deterministicSeed = Number.parseInt(process.env.ELEVENLABS_SEED ?? '42', 10);
 const maxElapsedSec = 30 * 60;
 const maxOverageSec = 300;
 
@@ -93,7 +96,9 @@ async function synthesizeToFile(text, outputPath) {
     },
     body: JSON.stringify({
       text,
-      model_id: 'eleven_turbo_v2_5',
+      model_id: modelId,
+      language_code: languageCode,
+      seed: Number.isFinite(deterministicSeed) ? deterministicSeed : 42,
       voice_settings: {
         stability: 0.45,
         similarity_boost: 0.8,
@@ -132,6 +137,9 @@ async function rewriteOverageManifest() {
 }
 
 async function main() {
+  console.log(`voice ${voiceId}`);
+  console.log(`model ${modelId}`);
+  console.log(`language ${languageCode}`);
   await rewriteElapsedManifest();
   await rewriteOverageManifest();
 
