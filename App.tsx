@@ -4,6 +4,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -137,7 +138,10 @@ function parseTime(mins: string, secs: string) {
 }
 
 function todayKey(date = new Date()) {
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function addDays(dateKey: string, delta: number) {
@@ -530,6 +534,7 @@ function formatLogTitle(log: LogEntry) {
 }
 
 export default function App() {
+  const [currentDateKey, setCurrentDateKey] = useState(() => todayKey());
   const [loaded, setLoaded] = useState(false);
   const [onboardingComplete, setOnboardingComplete] = useState(false);
   const [setupMode, setSetupMode] = useState<SetupMode>('timer');
@@ -554,7 +559,7 @@ export default function App() {
   const [maxHoldElapsed, setMaxHoldElapsed] = useState(0);
   const [setupManualMin, setSetupManualMin] = useState('2');
   const [setupManualSec, setSetupManualSec] = useState('30');
-  const [editorDate, setEditorDate] = useState(todayKey());
+  const [editorDate, setEditorDate] = useState(() => todayKey());
   const [dailyOutcome, setDailyOutcome] = useState<DailyOutcome>('completed');
   const [resultEffort, setResultEffort] = useState<Effort>('solid');
   const [resultNotes, setResultNotes] = useState('');
@@ -567,7 +572,7 @@ export default function App() {
   const lastElapsedCueRef = useRef(0);
 
   const recommendedKind = useMemo(() => recommendKind(pbSec, logs), [pbSec, logs]);
-  const assignedKind = dailyAssignment?.date === todayKey()
+  const assignedKind = dailyAssignment?.date === currentDateKey
     ? dailyAssignment.kind
     : recommendedKind;
   const plan = useMemo(() => buildPlan(assignedKind, pbSec, logs), [assignedKind, pbSec, logs]);
@@ -583,7 +588,7 @@ export default function App() {
     () => Math.min(...pbHistoryPreview.map((entry) => entry.pbSec), pbSec, 45),
     [pbHistoryPreview, pbSec],
   );
-  const todayWorkoutDone = dailyAssignment?.date === todayKey() && dailyAssignment.completed;
+  const todayWorkoutDone = dailyAssignment?.date === currentDateKey && dailyAssignment.completed;
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -591,6 +596,16 @@ export default function App() {
       staysActiveInBackground: false,
       shouldDuckAndroid: true,
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const syncCurrentDate = () => setCurrentDateKey(todayKey());
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') syncCurrentDate();
+    });
+
+    syncCurrentDate();
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
@@ -625,7 +640,7 @@ export default function App() {
     if (!loaded) return;
 
     setDailyAssignment((current) => {
-      const today = todayKey();
+      const today = currentDateKey;
       const currentLog = getLogForDate(logs, today);
 
       if (current?.date === today) {
@@ -641,7 +656,7 @@ export default function App() {
         completed: Boolean(currentLog?.completed),
       };
     });
-  }, [loaded, logs, recommendedKind]);
+  }, [currentDateKey, loaded, logs, recommendedKind]);
 
   useEffect(() => {
     const active = running || maxHoldRunning;
@@ -674,7 +689,7 @@ export default function App() {
           clearInterval(timer);
           setRunning(false);
           setSessionComplete(true);
-          setDailyAssignment((current) => current && current.date === todayKey()
+          setDailyAssignment((current) => current && current.date === currentDateKey
             ? { ...current, completed: true }
             : current);
           if (audioEnabled && currentPhase.kind === 'hold') {
@@ -694,7 +709,7 @@ export default function App() {
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [running, phaseIndex, currentPhase, plan.phases]);
+  }, [currentDateKey, running, phaseIndex, currentPhase, plan.phases]);
 
   useEffect(() => {
     if (!running || !audioEnabled || !currentPhase) return;
@@ -871,22 +886,26 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (loaded) loadEditor(todayKey());
-  }, [loaded]);
+    if (!loaded) return;
+    if (editorDate === currentDateKey) return;
+    if (editorDate > currentDateKey || editorDate === addDays(currentDateKey, -1)) {
+      loadEditor(currentDateKey);
+    }
+  }, [currentDateKey, editorDate, loaded]);
 
   function saveLog() {
     if (!isValidDateKey(editorDate)) {
       setEditorMessage('Use YYYY-MM-DD.');
       return;
     }
-    if (editorDate > todayKey()) {
+    if (editorDate > currentDateKey) {
       setEditorMessage('Can’t save future days.');
       return;
     }
     const existingLog = getLogForDate(logs, editorDate);
     const nextKind = dailyOutcome === 'rest'
       ? 'recovery'
-      : editorDate === todayKey()
+      : editorDate === currentDateKey
         ? assignedKind
         : existingLog?.kind ?? recommendedKind;
     const entry: LogEntry = {
@@ -901,7 +920,7 @@ export default function App() {
     };
     const nextLogs = normalizeLogs([entry, ...logs.filter((log) => log.date !== editorDate)]);
     setLogs(nextLogs);
-    if (editorDate === todayKey()) {
+    if (editorDate === currentDateKey) {
       setDailyAssignment((current) => current && current.date === editorDate
         ? { ...current, completed: dailyOutcome !== 'missed' }
         : {
@@ -910,7 +929,7 @@ export default function App() {
           completed: dailyOutcome !== 'missed',
         });
     }
-    setEditorMessage(editorDate === todayKey() ? 'Saved session.' : `Saved ${editorDate}.`);
+    setEditorMessage(editorDate === currentDateKey ? 'Saved session.' : `Saved ${editorDate}.`);
   }
 
   function savePbEdit() {
@@ -1058,7 +1077,7 @@ export default function App() {
                 <View style={styles.kindBadge}><Text style={styles.kindBadgeText}>{KIND_LABEL[plan.kind]}</Text></View>
               </View>
               {plan.readyForPb ? <Text style={styles.readyText}>PB-ready runway is building.</Text> : null}
-              <Text style={styles.helperText}>{dailyAssignment?.date === todayKey() ? 'Locked for today.' : plan.totalWorkoutTime}</Text>
+              <Text style={styles.helperText}>{dailyAssignment?.date === currentDateKey ? 'Locked for today.' : plan.totalWorkoutTime}</Text>
               <View style={styles.infoBox}><Text style={styles.infoBoxLabel}>Why today</Text><Text style={styles.infoBoxText}>{plan.why}</Text></View>
               <View style={styles.workoutTable}>
                 <View style={styles.workoutHeaderRow}>
@@ -1102,11 +1121,11 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>{editorDate === todayKey() ? 'Log session' : `Edit ${editorDate}`}</Text>
-          {editorDate !== todayKey() ? (
+          <Text style={styles.cardTitle}>{editorDate === currentDateKey ? 'Log session' : `Edit ${editorDate}`}</Text>
+          {editorDate !== currentDateKey ? (
             <View style={styles.editingRow}>
               <Text style={styles.helperText}>Editing a history entry.</Text>
-              <Pressable onPress={() => loadEditor(todayKey())} style={styles.miniButton}><Text style={styles.miniButtonText}>Back to today</Text></Pressable>
+              <Pressable onPress={() => loadEditor(currentDateKey)} style={styles.miniButton}><Text style={styles.miniButtonText}>Back to today</Text></Pressable>
             </View>
           ) : null}
           <Text style={styles.sectionLabel}>What happened?</Text>
@@ -1135,7 +1154,7 @@ export default function App() {
           ) : null}
           <Text style={styles.sectionLabel}>Notes</Text>
           <TextInput value={resultNotes} onChangeText={setResultNotes} style={styles.notesInput} multiline placeholder="Optional" placeholderTextColor="#64748b" />
-          <Pressable onPress={saveLog} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{editorDate === todayKey() ? 'Submit session log' : 'Save changes'}</Text></Pressable>
+          <Pressable onPress={saveLog} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{editorDate === currentDateKey ? 'Submit session log' : 'Save changes'}</Text></Pressable>
           {editorMessage ? <Text style={styles.helperText}>{editorMessage}</Text> : null}
         </View>
 
