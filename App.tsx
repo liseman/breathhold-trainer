@@ -84,6 +84,7 @@ const STORAGE_KEY = 'breathhold-trainer-v3';
 const REST_DAY_TITLE = 'Rest day';
 const MAX_WORKOUT_SEC = 30 * 60;
 const MAX_PB_SEC = 30 * 60;
+const HISTORY_PAGE_SIZE = 14;
 const REST_COUNTDOWN_CUES = [60, 30, 20, 10, 5, 4, 3, 2, 1] as const;
 const HOLD_COUNTDOWN_CUES: Record<number, string> = {
   60: 'One minute left',
@@ -172,6 +173,36 @@ function normalizePbHistory(history: PbHistoryEntry[] | undefined, fallbackPbSec
     at: new Date().toISOString(),
     pbSec: clamp(fallbackPbSec, 45, MAX_PB_SEC),
   }];
+}
+
+function buildMaxHoldTimeline(logs: LogEntry[], history: PbHistoryEntry[] | undefined, fallbackPbSec: number) {
+  const byDay = new Map<string, PbHistoryEntry>();
+
+  for (const entry of normalizePbHistory(history, fallbackPbSec)) {
+    byDay.set(entry.at.slice(0, 10), { at: entry.at, pbSec: clamp(entry.pbSec, 45, MAX_PB_SEC) });
+  }
+
+  for (const log of logs) {
+    if (!log.completed || !Number.isFinite(log.bestHoldSec)) continue;
+    const at = `${log.date}T12:00:00.000Z`;
+    const pbSec = clamp(log.bestHoldSec ?? fallbackPbSec, 45, MAX_PB_SEC);
+    const current = byDay.get(log.date);
+
+    if (!current || pbSec > current.pbSec) {
+      byDay.set(log.date, { at, pbSec });
+    }
+  }
+
+  const timeline = [...byDay.values()].sort((a, b) => a.at.localeCompare(b.at));
+  const currentPb = clamp(fallbackPbSec, 45, MAX_PB_SEC);
+
+  if (timeline.length === 0) return [{ at: new Date().toISOString(), pbSec: currentPb }];
+
+  if (timeline[timeline.length - 1]?.pbSec !== currentPb) {
+    timeline.push({ at: new Date().toISOString(), pbSec: currentPb });
+  }
+
+  return timeline;
 }
 
 function formatMiniDateLabel(value: string) {
@@ -557,6 +588,7 @@ export default function App() {
   const [setupManualMin, setSetupManualMin] = useState('2');
   const [setupManualSec, setSetupManualSec] = useState('30');
   const [editorDate, setEditorDate] = useState(() => todayKey());
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(HISTORY_PAGE_SIZE);
   const [dailyOutcome, setDailyOutcome] = useState<DailyOutcome>('completed');
   const [resultEffort, setResultEffort] = useState<Effort>('solid');
   const [resultNotes, setResultNotes] = useState('');
@@ -574,16 +606,17 @@ export default function App() {
     : recommendedKind;
   const plan = useMemo(() => buildPlan(assignedKind, pbSec, logs), [assignedKind, pbSec, logs]);
   const currentPhase = plan.phases[phaseIndex];
-  const recentLogs = useMemo(() => sortLogs(logs).slice(0, 14), [logs]);
+  const sortedLogs = useMemo(() => sortLogs(logs), [logs]);
+  const visibleHistoryLogs = useMemo(() => sortedLogs.slice(0, historyVisibleCount), [sortedLogs, historyVisibleCount]);
   const loggedWorkoutCount = useMemo(() => logs.filter((log) => !log.inferred).length, [logs]);
-  const pbHistoryPreview = useMemo(() => normalizePbHistory(pbHistory, pbSec).slice(-7), [pbHistory, pbSec]);
+  const maxHoldTimeline = useMemo(() => buildMaxHoldTimeline(logs, pbHistory, pbSec), [logs, pbHistory, pbSec]);
   const maxPbHistoryValue = useMemo(
-    () => Math.max(...pbHistoryPreview.map((entry) => entry.pbSec), pbSec, 45),
-    [pbHistoryPreview, pbSec],
+    () => Math.max(...maxHoldTimeline.map((entry) => entry.pbSec), pbSec, 45),
+    [maxHoldTimeline, pbSec],
   );
   const minPbHistoryValue = useMemo(
-    () => Math.min(...pbHistoryPreview.map((entry) => entry.pbSec), pbSec, 45),
-    [pbHistoryPreview, pbSec],
+    () => Math.min(...maxHoldTimeline.map((entry) => entry.pbSec), pbSec, 45),
+    [maxHoldTimeline, pbSec],
   );
   const todayWorkoutDone = dailyAssignment?.date === currentDateKey && dailyAssignment.completed;
 
@@ -913,6 +946,7 @@ export default function App() {
       completed: dailyOutcome !== 'missed',
       inferred: false,
       effort: dailyOutcome === 'completed' ? resultEffort : dailyOutcome === 'rest' ? 'easy' : undefined,
+      bestHoldSec: dailyOutcome === 'completed' && nextKind === 'pb' ? pbSec : existingLog?.bestHoldSec,
       notes: resultNotes.trim() || undefined,
     };
     const nextLogs = normalizeLogs([entry, ...logs.filter((log) => log.date !== editorDate)]);
@@ -1003,36 +1037,38 @@ export default function App() {
                 <Text style={styles.secondaryButtonText}>{editingPb ? 'Close editor' : 'Edit'}</Text>
               </Pressable>
               <View style={styles.pbTrendHeader}>
-                <Text style={styles.pbTrendTitle}>Recent progress</Text>
+                <Text style={styles.pbTrendTitle}>Max hold trend</Text>
                 <Text style={styles.pbTrendMeta}>
-                  {pbHistoryPreview.length > 1
-                    ? `${formatTime(pbHistoryPreview[0]?.pbSec ?? pbSec)} -> ${formatTime(pbHistoryPreview[pbHistoryPreview.length - 1]?.pbSec ?? pbSec)}`
+                  {maxHoldTimeline.length > 1
+                    ? `${formatTime(maxHoldTimeline[0]?.pbSec ?? pbSec)} -> ${formatTime(maxHoldTimeline[maxHoldTimeline.length - 1]?.pbSec ?? pbSec)}`
                     : 'First max hold logged'}
                 </Text>
               </View>
-              <View style={styles.pbGraph}>
-                {pbHistoryPreview.map((entry) => (
-                  <View key={entry.at} style={styles.pbBarWrap}>
-                    <View
-                      style={[
-                        styles.pbBar,
-                        {
-                          height: `${Math.max(
-                            18,
-                            minPbHistoryValue === maxPbHistoryValue
-                              ? 52
-                              : 18 + (((entry.pbSec - minPbHistoryValue) / (maxPbHistoryValue - minPbHistoryValue)) * 50),
-                          )}%`,
-                          opacity: entry.pbSec === pbSec ? 1 : 0.72,
-                        },
-                      ]}
-                    />
-                  </View>
-                ))}
-              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pbGraphScroll}>
+                <View style={[styles.pbGraph, styles.pbGraphInner, { width: Math.max(maxHoldTimeline.length * 22, 220) }]}>
+                  {maxHoldTimeline.map((entry, index) => (
+                    <View key={`${entry.at}-${index}`} style={styles.pbBarWrap}>
+                      <View
+                        style={[
+                          styles.pbBar,
+                          {
+                            height: `${Math.max(
+                              18,
+                              minPbHistoryValue === maxPbHistoryValue
+                                ? 52
+                                : 18 + (((entry.pbSec - minPbHistoryValue) / (maxPbHistoryValue - minPbHistoryValue)) * 50),
+                            )}%`,
+                            opacity: entry.pbSec === pbSec ? 1 : 0.72,
+                          },
+                        ]}
+                      />
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
               <View style={styles.pbAxisRow}>
-                <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(pbHistoryPreview[0]?.at ?? new Date().toISOString())}</Text>
-                <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(pbHistoryPreview[pbHistoryPreview.length - 1]?.at ?? new Date().toISOString())}</Text>
+                <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(maxHoldTimeline[0]?.at ?? new Date().toISOString())}</Text>
+                <Text style={styles.pbAxisLabel}>{formatMiniDateLabel(maxHoldTimeline[maxHoldTimeline.length - 1]?.at ?? new Date().toISOString())}</Text>
               </View>
               {editingPb ? (
                 <View style={styles.inlineEditor}>
@@ -1168,8 +1204,8 @@ export default function App() {
           </Pressable>
           {expandedSections.history ? (
             <>
-              {recentLogs.length === 0 ? <Text style={styles.helperText}>No entries yet.</Text> : null}
-              {recentLogs.map((log) => (
+              {visibleHistoryLogs.length === 0 ? <Text style={styles.helperText}>No entries yet.</Text> : null}
+              {visibleHistoryLogs.map((log) => (
                 <View key={log.id} style={styles.logRow}>
                   <View style={styles.logHeaderRow}>
                     <Text style={styles.logDate}>{log.date}</Text>
@@ -1183,6 +1219,20 @@ export default function App() {
                   {log.notes ? <Text style={styles.logNotes}>{log.notes}</Text> : null}
                 </View>
               ))}
+              {sortedLogs.length > HISTORY_PAGE_SIZE ? (
+                <View style={styles.historyActions}>
+                  {historyVisibleCount < sortedLogs.length ? (
+                    <Pressable onPress={() => setHistoryVisibleCount((count) => Math.min(count + HISTORY_PAGE_SIZE, sortedLogs.length))} style={styles.miniButton}>
+                      <Text style={styles.miniButtonText}>Show more</Text>
+                    </Pressable>
+                  ) : null}
+                  {historyVisibleCount > HISTORY_PAGE_SIZE ? (
+                    <Pressable onPress={() => setHistoryVisibleCount(HISTORY_PAGE_SIZE)} style={styles.miniButton}>
+                      <Text style={styles.miniButtonText}>Show less</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
             </>
           ) : null}
         </View>
@@ -1209,8 +1259,10 @@ const styles = StyleSheet.create({
   pbTrendHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 },
   pbTrendTitle: { color: '#dbeafe', fontSize: 13, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
   pbTrendMeta: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
+  pbGraphScroll: { paddingBottom: 2 },
   pbGraph: { height: 84, borderRadius: 16, backgroundColor: '#0a1220', borderWidth: 1, borderColor: '#22344f', paddingHorizontal: 12, paddingVertical: 10, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 8 },
-  pbBarWrap: { flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: '100%' },
+  pbGraphInner: { justifyContent: 'flex-start' },
+  pbBarWrap: { width: 14, alignItems: 'center', justifyContent: 'flex-end', height: '100%' },
   pbBar: { width: 12, borderRadius: 999, backgroundColor: '#38bdf8', minHeight: 10 },
   pbAxisRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: -2 },
   pbAxisLabel: { color: '#64748b', fontSize: 11, fontWeight: '700' },
@@ -1261,4 +1313,5 @@ const styles = StyleSheet.create({
   logTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '700' },
   logMeta: { color: '#93c5fd', fontSize: 12, fontWeight: '700' },
   logNotes: { color: '#cbd5e1', fontSize: 13, lineHeight: 18 },
+  historyActions: { flexDirection: 'row', gap: 10, marginTop: 4 },
 });
