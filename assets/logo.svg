@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1728"/>
+      <stop offset="1" stop-color="#08111f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.32" r="0.75">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bubbleGrad" cx="0.38" cy="0.32" r="0.8">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.5" stop-color="#7dd3fc"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="229.0688" fill="url(#bgGrad)"/>
+  <circle cx="512" cy="512" r="311.296" fill="url(#glow)"/>
+  <!-- hold ring (open at the top where the breath escapes/pauses) -->
+  <circle cx="512" cy="512" r="268.69759999999997" fill="none" stroke="#38bdf8" stroke-width="53.248" stroke-linecap="round" stroke-dasharray="1451.9180586591992 1688.2768123944177" transform="rotate(-115 512 512)" opacity="0.9"/>
+  <path d="M 308.8384 584.0896 Q 512 472.35072 715.1616 584.0896" fill="none" stroke="#38bdf8" stroke-width="48.98816" stroke-linecap="round" opacity="0.55"/>
+  <path d="M 361.2672 485.78560000000004 Q 512 402.88256 662.7328 485.78560000000004" fill="none" stroke="#38bdf8" stroke-width="42.5984" stroke-linecap="round" opacity="0.7000000000000001"/>
+  <path d="M 413.696 387.4816 Q 512 333.4144 610.304 387.4816" fill="none" stroke="#7dd3fc" stroke-width="36.20864" stroke-linecap="round" opacity="0.8500000000000001"/>
+  <circle cx="512" cy="341.6064" r="42.598400000000005" fill="url(#bubbleGrad)"/>
+  <circle cx="512" cy="341.6064" r="80.93696" fill="none" stroke="#7dd3fc" stroke-width="13.312" opacity="0.35"/>
+</svg>
