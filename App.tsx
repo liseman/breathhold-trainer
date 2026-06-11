@@ -593,6 +593,7 @@ export default function App() {
   const [resultEffort, setResultEffort] = useState<Effort>('solid');
   const [resultNotes, setResultNotes] = useState('');
   const [editorMessage, setEditorMessage] = useState('');
+  const skipPhaseStartBreatheIdRef = useRef<string | null>(null);
   const announcedPhaseIdRef = useRef<string | null>(null);
   const halfwayAnnouncedPhaseIdRef = useRef<string | null>(null);
   const announcedCountdownKeysRef = useRef<Set<string>>(new Set());
@@ -609,6 +610,7 @@ export default function App() {
   const sortedLogs = useMemo(() => sortLogs(logs), [logs]);
   const visibleHistoryLogs = useMemo(() => sortedLogs.slice(0, historyVisibleCount), [sortedLogs, historyVisibleCount]);
   const loggedWorkoutCount = useMemo(() => logs.filter((log) => !log.inferred).length, [logs]);
+  const currentEditorLog = useMemo(() => getLogForDate(logs, editorDate), [logs, editorDate]);
   const maxHoldTimeline = useMemo(() => buildMaxHoldTimeline(logs, pbHistory, pbSec), [logs, pbHistory, pbSec]);
   const maxPbHistoryValue = useMemo(
     () => Math.max(...maxHoldTimeline.map((entry) => entry.pbSec), pbSec, 45),
@@ -619,6 +621,7 @@ export default function App() {
     [maxHoldTimeline, pbSec],
   );
   const todayWorkoutDone = dailyAssignment?.date === currentDateKey && dailyAssignment.completed;
+  const currentDayLogSubmitted = editorDate === currentDateKey && Boolean(currentEditorLog);
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -722,10 +725,28 @@ export default function App() {
           setDailyAssignment((current) => current && current.date === currentDateKey
             ? { ...current, completed: true }
             : current);
-          if (audioEnabled && currentPhase.kind === 'hold') {
-            playPromptCue('Done').catch(() => {});
+          if (audioEnabled) {
+            if (pendingFollowupCueTimeoutRef.current) {
+              clearTimeout(pendingFollowupCueTimeoutRef.current);
+              pendingFollowupCueTimeoutRef.current = null;
+            }
+            if (currentPhase.kind === 'hold') {
+              playCue(breatheCue).catch(() => {});
+              pendingFollowupCueTimeoutRef.current = setTimeout(() => {
+                playPromptCue('Done').catch(() => {});
+                pendingFollowupCueTimeoutRef.current = null;
+              }, 650);
+            } else {
+              playPromptCue('Done').catch(() => {});
+            }
           }
           return 0;
+        }
+        if (audioEnabled && currentPhase.kind === 'hold' && (nextPhase.kind === 'rest' || nextPhase.kind === 'recovery')) {
+          skipPhaseStartBreatheIdRef.current = nextPhase.id;
+          playCue(breatheCue).catch(() => {});
+        } else {
+          skipPhaseStartBreatheIdRef.current = null;
         }
         setPhaseIndex(nextIndex);
         announcedPhaseIdRef.current = null;
@@ -751,7 +772,13 @@ export default function App() {
       clearTimeout(pendingFollowupCueTimeoutRef.current);
       pendingFollowupCueTimeoutRef.current = null;
     }
-    if (currentPhase.kind === 'rest' || currentPhase.kind === 'recovery') playCue(breatheCue).catch(() => {});
+    if (currentPhase.kind === 'rest' || currentPhase.kind === 'recovery') {
+      if (skipPhaseStartBreatheIdRef.current === currentPhase.id) {
+        skipPhaseStartBreatheIdRef.current = null;
+      } else {
+        playCue(breatheCue).catch(() => {});
+      }
+    }
   }, [running, audioEnabled, currentPhase]);
 
   useEffect(() => {
@@ -788,6 +815,7 @@ export default function App() {
 
     const restKey = `${currentPhase.id}:rest:${phaseRemaining}`;
     if (REST_COUNTDOWN_CUES.includes(phaseRemaining as (typeof REST_COUNTDOWN_CUES)[number]) && !countdownKeys.has(restKey)) {
+      if (phaseRemaining === currentPhase.durationSec && phaseRemaining === 60) return;
       countdownKeys.add(restKey);
       if (phaseRemaining === 1) {
         playPromptCue('1').catch(() => {});
@@ -960,7 +988,7 @@ export default function App() {
           completed: dailyOutcome !== 'missed',
         });
     }
-    setEditorMessage(editorDate === currentDateKey ? 'Saved session.' : `Saved ${editorDate}.`);
+    setEditorMessage('');
   }
 
   function savePbEdit() {
@@ -1187,7 +1215,15 @@ export default function App() {
           ) : null}
           <Text style={styles.sectionLabel}>Notes</Text>
           <TextInput value={resultNotes} onChangeText={setResultNotes} style={styles.notesInput} multiline placeholder="Optional" placeholderTextColor="#64748b" />
-          <Pressable onPress={saveLog} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{editorDate === currentDateKey ? 'Submit session log' : 'Save changes'}</Text></Pressable>
+          <Pressable
+            disabled={currentDayLogSubmitted}
+            onPress={saveLog}
+            style={[styles.primaryButton, currentDayLogSubmitted && styles.primaryButtonDisabled]}
+          >
+            <Text style={[styles.primaryButtonText, currentDayLogSubmitted && styles.primaryButtonTextDisabled]}>
+              {currentDayLogSubmitted ? 'Submitted' : editorDate === currentDateKey ? 'Submit session log' : 'Save changes'}
+            </Text>
+          </Pressable>
           {editorMessage ? <Text style={styles.helperText}>{editorMessage}</Text> : null}
         </View>
 
