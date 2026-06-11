@@ -40,6 +40,9 @@ jobs:
       - name: Build web export
         run: npm run build:web
 
+      - name: Copy static support page
+        run: cp public/support.html dist/support.html
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
