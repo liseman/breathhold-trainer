@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HoldMore Support</title>
-  <meta name="description" content="Support, safety notes, and contact information for the HoldMore breath-hold training app." />
+  <title>HoldMore Support & Privacy Policy</title>
+  <meta name="description" content="Support, safety notes, and privacy policy for the HoldMore breath-hold training app." />
   <style>
     :root {
       color-scheme: light dark;
@@ -21,14 +21,14 @@
       padding: 32px 16px;
     }
     main {
-      width: min(760px, 100%);
+      width: min(820px, 100%);
       background: rgba(255, 255, 255, 0.07);
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 24px;
       padding: 32px;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
     }
-    h1, h2 {
+    h1, h2, h3 {
       line-height: 1.15;
       margin: 0 0 12px;
     }
@@ -36,8 +36,12 @@
       font-size: clamp(2rem, 6vw, 3.5rem);
     }
     h2 {
-      margin-top: 28px;
-      font-size: 1.2rem;
+      margin-top: 32px;
+      font-size: 1.45rem;
+    }
+    h3 {
+      margin-top: 24px;
+      font-size: 1.1rem;
     }
     p, li {
       color: #cdd9ee;
@@ -64,8 +68,21 @@
       border-radius: 16px;
       background: rgba(0, 0, 0, 0.18);
     }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 22px 0 8px;
+    }
+    nav a {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      text-decoration: none;
+      font-weight: 700;
+    }
     footer {
-      margin-top: 28px;
+      margin-top: 32px;
       font-size: 0.9rem;
       color: #9fb1cc;
     }
@@ -73,22 +90,28 @@
 </head>
 <body>
   <main>
-    <span class="badge">Support</span>
+    <span class="badge">Support & Privacy</span>
     <h1>HoldMore Breath-Hold Trainer</h1>
     <p>
       HoldMore is a dry breath-hold training timer for CO₂ tables, O₂ tables,
       technique sessions, PR preparation, and weekly practice structure.
     </p>
 
-    <section class="card" aria-labelledby="support-heading">
-      <h2 id="support-heading">Need help?</h2>
+    <nav aria-label="Page sections">
+      <a href="#support">Support</a>
+      <a href="#safety">Safety</a>
+      <a href="#privacy">Privacy Policy</a>
+    </nav>
+
+    <section class="card" id="support" aria-labelledby="support-heading">
+      <h2 id="support-heading">Support</h2>
       <p>
         Email <a href="mailto:luke@lukeiseman.com?subject=HoldMore%20Support">luke@lukeiseman.com</a>
         with your device model, iOS version, and a short description of the issue.
       </p>
     </section>
 
-    <section aria-labelledby="safety-heading">
+    <section id="safety" aria-labelledby="safety-heading">
       <h2 id="safety-heading">Safety</h2>
       <ul>
         <li>Use this app for dry training only.</li>
@@ -99,10 +122,51 @@
       </ul>
     </section>
 
-    <section aria-labelledby="privacy-heading">
-      <h2 id="privacy-heading">Privacy</h2>
+    <section id="privacy" aria-labelledby="privacy-heading">
+      <h2 id="privacy-heading">Privacy Policy</h2>
+      <p><strong>Effective date:</strong> June 11, 2026</p>
+
+      <h3>Overview</h3>
       <p>
-        HoldMore does not require an account. Training settings and session state are stored on your device.
+        HoldMore does not require an account and does not ask you to provide your name,
+        email address, phone number, location, or health records.
+      </p>
+
+      <h3>Information collected by the app</h3>
+      <p>
+        HoldMore stores your app settings and training session state on your device so the app can
+        run timers, show your selected training options, and preserve local progress. This information
+        is not transmitted to the developer by the app.
+      </p>
+
+      <h3>Analytics, advertising, and tracking</h3>
+      <p>
+        HoldMore does not include third-party advertising SDKs, does not sell personal information,
+        and does not track you across other apps or websites.
+      </p>
+
+      <h3>Data sharing</h3>
+      <p>
+        HoldMore does not share personal information with third parties. If you email support, the
+        information you choose to include in that email will be used only to respond to your request.
+      </p>
+
+      <h3>Children</h3>
+      <p>
+        HoldMore is not directed to children under 13. If you believe a child has provided personal
+        information through a support request, contact support and it will be deleted.
+      </p>
+
+      <h3>Changes</h3>
+      <p>
+        This policy may be updated when the app changes. The effective date above will be updated
+        when material changes are made.
+      </p>
+
+      <h3>Contact</h3>
+      <p>
+        Privacy questions can be sent to
+        <a href="mailto:luke@lukeiseman.com?subject=HoldMore%20Privacy">luke@lukeiseman.com</a>.
       </p>
     </section>
 
