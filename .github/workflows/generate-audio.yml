@@ -1,0 +1,43 @@
+name: Regenerate voice cues (ElevenLabs)
+
+on:
+  workflow_dispatch:
+    inputs:
+      voice_name:
+        description: ElevenLabs voice name to use
+        default: luke1
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate audio
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_NAME: ${{ inputs.voice_name }}
+        run: |
+          if [ -z "$ELEVENLABS_API_KEY" ]; then
+            echo "Add an ELEVENLABS_API_KEY repository secret first." >&2
+            exit 1
+          fi
+          node scripts/generate-audio.mjs
+
+      - name: Commit regenerated audio
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/audio/cues
+          git diff --cached --quiet || git commit -m "Regenerate voice cues"
+          git push

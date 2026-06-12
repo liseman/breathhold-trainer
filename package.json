@@ -1,0 +1,36 @@
+{
+  "name": "7mw",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "audio:regen": "node ./scripts/generate-audio.mjs",
+    "audio:placeholders": "node ./scripts/generate-placeholder-audio.mjs",
+    "icons:regen": "node ./scripts/render-icons.mjs",
+    "build:web": "expo export --platform web && cp dist/index.html dist/404.html",
+    "build:ios": "npx eas-cli build --platform ios --profile production",
+    "submit:ios": "npx eas-cli submit --platform ios --profile production"
+  },
+  "dependencies": {
+    "expo": "~54.0.33",
+    "expo-av": "~16.0.8",
+    "expo-keep-awake": "^55.0.8",
+    "expo-status-bar": "~3.0.8",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.4",
+    "react-native-svg": "15.12.1",
+    "react-native-web": "^0.21.0"
+  },
+  "devDependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@types/react": "~19.1.10",
+    "sharp": "^0.34.1",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
