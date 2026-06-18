@@ -40,6 +40,7 @@ type TableRow = {
   round: number;
   restSec: number;
   holdSec: number;
+  holdDisplay?: string;
 };
 
 type Phase = {
@@ -56,6 +57,7 @@ type DailyPlan = {
   summary: string;
   why: string;
   totalWorkoutTime: string;
+  goalLabel?: string;
   readyForPb: boolean;
   phases: Phase[];
   tableRows: TableRow[];
@@ -130,6 +132,11 @@ function formatTime(totalSeconds: number) {
   const mins = Math.floor(safe / 60);
   const secs = safe % 60;
   return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+function formatSignedTimer(totalSeconds: number) {
+  if (totalSeconds >= 0) return formatTime(totalSeconds);
+  return `+${formatTime(Math.abs(totalSeconds))}`;
 }
 
 function parseTime(mins: string, secs: string) {
@@ -396,6 +403,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       title: 'Recovery day',
       summary: 'Keep it light.',
       totalWorkoutTime: describeTotalWorkoutTime(rows),
+      goalLabel: undefined,
       why: daysSinceLast >= 3
         ? 'You had a gap, so today should be a smooth re-entry.'
         : yesterday?.notes && analyzeNotes(yesterday.notes).needsRecovery
@@ -415,6 +423,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       title: 'Technique',
       summary: 'Easy statics. Clean form.',
       totalWorkoutTime: describeTotalWorkoutTime(rows),
+      goalLabel: undefined,
       why: yesterday?.inferred
         ? 'Yesterday was treated as rest, so today is a clean re-entry.'
         : 'Low-cost work that still sharpens relaxation and efficiency.',
@@ -438,6 +447,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
       title: 'O₂ day',
       summary: 'Fixed rest. Rising holds.',
       totalWorkoutTime: describeTotalWorkoutTime(rows),
+      goalLabel: undefined,
       why: yesterday?.kind === 'recovery' || yesterday?.kind === 'technique'
         ? 'Yesterday stayed light enough that today can push range.'
         : 'You have enough recent base work to lean into hypoxic range today.',
@@ -450,7 +460,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
   if (kind === 'pb') {
     const warmupOne = Math.round(pbSec * 0.55);
     const warmupTwo = Math.round(pbSec * 0.82);
-    const target = clamp(pbSec + 180, Math.round(pbSec * 1.12), MAX_PB_SEC);
+    const target = pbSec;
     const rows = fitRowsWithinMax([
       { round: 1, restSec: 180, holdSec: warmupOne },
       { round: 2, restSec: 240, holdSec: warmupTwo },
@@ -459,8 +469,9 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
     return {
       kind,
       title: 'PB attempt',
-      summary: `Target ${formatTime(rows[2]?.holdSec ?? target)}. One clean shot.`,
+      summary: `Goal ${formatTime(pbSec)}+. One clean shot.`,
       totalWorkoutTime: describeTotalWorkoutTime(rows),
+      goalLabel: `${formatTime(pbSec)}+`,
       why: 'Your recent pattern is consistent enough to take a real shot.',
       readyForPb: true,
       phases: [
@@ -471,7 +482,11 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
         { id: '2-rest', kind: 'recovery', label: 'Long reset', durationSec: rows[2]?.restSec ?? 300, roundLabel: 'Target' },
         { id: '3-hold', kind: 'hold', label: 'Target hold', durationSec: rows[2]?.holdSec ?? target, roundLabel: 'Target' },
       ],
-      tableRows: rows,
+      tableRows: rows.map((row) => (
+        row.round === 3
+          ? { ...row, holdDisplay: `${formatTime(pbSec)}+` }
+          : row
+      )),
     };
   }
 
@@ -488,6 +503,7 @@ function buildPlan(kind: SessionKind, pbSec: number, logs: LogEntry[]): DailyPla
     title: 'CO₂ day',
     summary: 'Same hold. Shrinking rest.',
     totalWorkoutTime: describeTotalWorkoutTime(rows),
+    goalLabel: undefined,
     why: yesterday?.kind === 'o2'
       ? 'Yesterday pushed hypoxia, so today shifts the stress toward tolerance.'
       : 'This is the safest hard default when you want pressure without going straight to max-range work.',
@@ -590,6 +606,7 @@ export default function App() {
   const [editorDate, setEditorDate] = useState(() => todayKey());
   const [historyVisibleCount, setHistoryVisibleCount] = useState(HISTORY_PAGE_SIZE);
   const [dailyOutcome, setDailyOutcome] = useState<DailyOutcome>('completed');
+  const [editorKind, setEditorKind] = useState<SessionKind>('recovery');
   const [resultEffort, setResultEffort] = useState<Effort>('solid');
   const [resultNotes, setResultNotes] = useState('');
   const [editorMessage, setEditorMessage] = useState('');
@@ -622,6 +639,7 @@ export default function App() {
   );
   const todayWorkoutDone = dailyAssignment?.date === currentDateKey && dailyAssignment.completed;
   const currentDayLogSubmitted = editorDate === currentDateKey && Boolean(currentEditorLog);
+  const isPbFinalHold = plan.kind === 'pb' && currentPhase?.id === '3-hold';
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -715,6 +733,9 @@ export default function App() {
     if (!running || !currentPhase) return;
     const timer = setInterval(() => {
       setPhaseRemaining((prev) => {
+        if (plan.kind === 'pb' && currentPhase.id === '3-hold') {
+          return prev - 1;
+        }
         if (prev > 1) return prev - 1;
         const nextIndex = phaseIndex + 1;
         const nextPhase = plan.phases[nextIndex];
@@ -838,7 +859,7 @@ export default function App() {
     if (plan.kind !== 'pb' || currentPhase.id !== '3-hold') return;
 
     const countdownKeys = announcedCountdownKeysRef.current;
-    const elapsed = currentPhase.durationSec - phaseRemaining;
+    const elapsed = phaseRemaining < 0 ? Math.abs(phaseRemaining) : 0;
     if (elapsed <= 0 || elapsed % 10 !== 0) return;
 
     const cueKey = `${currentPhase.id}:plus:${elapsed}`;
@@ -934,6 +955,7 @@ export default function App() {
     const log = getLogForDate(logs, date);
     setEditorDate(date);
     setDailyOutcome(outcomeFromLog(log));
+    setEditorKind(log?.kind ?? (date === currentDateKey ? assignedKind : recommendedKind));
     setResultEffort(log?.effort ?? 'solid');
     setResultNotes(log?.notes === 'Auto-logged rest day.' ? '' : log?.notes ?? '');
     setEditorMessage('');
@@ -946,7 +968,7 @@ export default function App() {
   useEffect(() => {
     if (!loaded) return;
     if (editorDate === currentDateKey) return;
-    if (editorDate > currentDateKey || editorDate === addDays(currentDateKey, -1)) {
+    if (editorDate > currentDateKey) {
       loadEditor(currentDateKey);
     }
   }, [currentDateKey, editorDate, loaded]);
@@ -965,7 +987,7 @@ export default function App() {
       ? 'recovery'
       : editorDate === currentDateKey
         ? assignedKind
-        : existingLog?.kind ?? recommendedKind;
+        : editorKind;
     const entry: LogEntry = {
       id: `${editorDate}-${Date.now()}`,
       date: editorDate,
@@ -1150,7 +1172,7 @@ export default function App() {
                   <View key={row.round} style={styles.workoutRow}>
                     <Text style={styles.workoutCell}>{row.round}</Text>
                     <Text style={styles.workoutCell}>{formatTime(row.restSec)}</Text>
-                    <Text style={styles.workoutCell}>{formatTime(row.holdSec)}</Text>
+                    <Text style={styles.workoutCell}>{row.holdDisplay ?? formatTime(row.holdSec)}</Text>
                   </View>
                 ))}
               </View>
@@ -1167,8 +1189,12 @@ export default function App() {
           </View>
           <View style={styles.timerShell}>
             <Text style={styles.timerPhase}>{sessionComplete ? 'COMPLETE' : currentPhase ? currentPhase.label.toUpperCase() : 'READY'}</Text>
-            <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatTime(phaseRemaining)}</Text>
-            <Text style={styles.timerRound}>{currentPhase?.roundLabel ?? plan.title}</Text>
+            <Text style={styles.timerValue}>{sessionComplete ? 'Done' : formatSignedTimer(phaseRemaining)}</Text>
+            <Text style={styles.timerRound}>
+              {isPbFinalHold && plan.goalLabel
+                ? `${currentPhase?.roundLabel ?? plan.title} · Goal ${plan.goalLabel}`
+                : currentPhase?.roundLabel ?? plan.title}
+            </Text>
           </View>
           <Pressable
             onPress={toggleSession}
@@ -1201,6 +1227,18 @@ export default function App() {
               </Pressable>
             ))}
           </View>
+          {editorDate !== currentDateKey ? (
+            <>
+              <Text style={styles.sectionLabel}>Session type</Text>
+              <View style={styles.choiceWrap}>
+                {(['technique', 'co2', 'o2', 'pb', 'recovery'] as SessionKind[]).map((kind) => (
+                  <Pressable key={kind} onPress={() => setEditorKind(kind)} style={[styles.choiceChip, editorKind === kind && styles.choiceChipActive]}>
+                    <Text style={[styles.choiceChipText, editorKind === kind && styles.choiceChipTextActive]}>{KIND_LABEL[kind]}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          ) : null}
           {dailyOutcome === 'completed' ? (
             <>
               <Text style={styles.sectionLabel}>How did it feel?</Text>
