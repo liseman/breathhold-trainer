@@ -6,7 +6,7 @@ const baseUrl = process.env.EXPO_PUBLIC_BASE_PATH || `/${REPO_NAME}`;
 const config: ExpoConfig = {
   name: 'HoldMore',
   slug: 'breathhold-trainer',
-  version: '1.0.0',
+  version: '1.0.1',
   orientation: 'portrait',
   userInterfaceStyle: 'dark',
   icon: './assets/icon.png',
